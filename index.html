@@ -1,0 +1,1404 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kas Bon POS Pro v7 - BIONE SELL</title>
+    
+    <!-- 1. Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- 2. React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- 3. Babel (Untuk membaca JSX di dalam Browser) -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- 4. Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <style>
+        /* Sembunyikan scrollbar tapi tetap bisa di-scroll */
+        .scrollbar-none::-webkit-scrollbar { display: none; }
+        .scrollbar-none { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-100 font-sans antialiased selection:bg-amber-500 selection:text-slate-950 print:bg-white print:text-slate-950">
+
+    <!-- Container Utama React -->
+    <div id="root"></div>
+
+    <!-- LOGIKA APLIKASI (JSX) -->
+    <script type="text/babel">
+        // Destrukturisasi React Hooks dari global window.React
+        const { useState, useEffect, useMemo, useRef } = React;
+
+        // --- KOMPONEN IKON KUSTOM ---
+        // Menggantikan fungsi import { IconName } dari 'lucide-react'
+        const Icon = ({ name, size = 24, className = "" }) => {
+            const iconData = window.lucide.icons[name];
+            if (!iconData) return null;
+            const svgString = iconData.toSvg({ width: size, height: size });
+            return <span className={`inline-flex items-center justify-center ${className}`} dangerouslySetInnerHTML={{ __html: svgString }} />;
+        };
+
+        // --- DATA AWAL (SEEDERS) ---
+        const INITIAL_PRODUCTS = [
+            { id: 'p1', name: 'Beras Premium Cianjur', price: 16000, unit: 'KG' },
+            { id: 'p2', name: 'Minyak Goreng Sawit 1L', price: 21000, unit: 'Liter' },
+            { id: 'p3', name: 'Gula Pasir Kristal', price: 17000, unit: 'KG' },
+            { id: 'p4', name: 'Telur Ayam Negeri', price: 28000, unit: 'KG' }
+        ];
+
+        const INITIAL_CUSTOMERS = [
+            { id: 'c1', name: 'Budi Santoso', phone: '081234567890', address: 'Jl. Merdeka' }
+        ];
+
+        const INITIAL_TRANSACTIONS = [];
+
+        const INITIAL_SHOP_CONFIG = {
+            name: 'WARUNG KITA PRO V7',
+            owner: 'Kasir',
+            address: 'Jl. Jenderal Sudirman No. 45',
+            whatsapp: '081234567890',
+            logo: '',
+            colorTheme: 'navy-gold'
+        };
+
+        const DEFAULT_WA_TEMPLATES = [
+            {
+                id: 't-1',
+                name: 'Pengingat Santun Jatuh Tempo',
+                content: "Halo {nama},\nIni pengingat dari {toko} bahwa Anda memiliki tagihan belanja sebesar {total} dengan jatuh tempo {tanggal_jatuh_tempo}.\nDetail Belanja: {detail_bon}.\nMohon kesediaannya untuk segera melakukan pelunasan. Terima kasih banyak 🙏."
+            }
+        ];
+
+        const AVAILABLE_UNITS = ['PCS', 'KG', 'Gram', 'Liter', 'Box', 'Pack', 'Meter', 'Botol', 'Sachet'];
+
+        // --- FUNGSI BANTU FORMAT UANG & TANGGAL ---
+        const formatIDR = (val) => {
+            const num = Number(val) || 0;
+            return new Intl.NumberFormat('id-ID', {
+                style: 'currency', currency: 'IDR', minimumFractionDigits: 0, maximumFractionDigits: 0
+            }).format(num);
+        };
+
+        const formatDate = (dateStr) => {
+            if (!dateStr) return '-';
+            try {
+                const d = new Date(dateStr);
+                return d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+            } catch (e) { return dateStr; }
+        };
+
+        // ==========================================
+        // ALGORITHMIC DYNAMIC LICENSE VALIDATOR
+        // ==========================================
+        const TRIAL_DAYS = 7;
+
+        const validateLicenseKey = (key) => {
+            if (!key || typeof key !== 'string') return false;
+            const cleanKey = key.trim().toUpperCase();
+            const parts = cleanKey.split('-');
+            
+            // Format wajib: BIONE - XXXX - YYYY
+            if (parts.length !== 3 || parts[0] !== 'BIONE' || parts[1].length !== 4 || parts[2].length !== 4) return false;
+
+            const base = parts[1];
+            const expectedSig = parts[2];
+            const salt = "ROBI2026"; // Secret Salt Maker
+            let actualSig = "";
+
+            for (let i = 0; i < base.length; i++) {
+                const charCode = base.charCodeAt(i);
+                const saltCode = salt.charCodeAt(i % salt.length);
+                const mixed = (charCode + saltCode + i) % 36;
+                actualSig += mixed < 10 ? String.fromCharCode(48 + mixed) : String.fromCharCode(55 + mixed);
+            }
+
+            return actualSig === expectedSig;
+        };
+
+        // --- KOMPONEN APLIKASI UTAMA ---
+        function App() {
+            const [activeTab, setActiveTab] = useState('dashboard');
+            const [subTabBukuKas, setSubTabBukuKas] = useState('daftar'); 
+            
+            // --- LICENSE & TRIAL STATE ---
+            const [installDate, setInstallDate] = useState(() => {
+                let date = localStorage.getItem('kbp_install_date_v7');
+                if (!date) {
+                    date = new Date().toISOString();
+                    localStorage.setItem('kbp_install_date_v7', date);
+                }
+                return date;
+            });
+
+            const [licenseKey, setLicenseKey] = useState(() => {
+                return localStorage.getItem('kbp_license_key_v7') || '';
+            });
+
+            const [licenseInput, setLicenseInput] = useState('');
+
+            // Hitung sisa hari trial
+            const msPerDay = 24 * 60 * 60 * 1000;
+            const daysUsed = Math.floor((new Date() - new Date(installDate)) / msPerDay);
+            const trialDaysLeft = Math.max(0, TRIAL_DAYS - daysUsed);
+            
+            const isLicensed = validateLicenseKey(licenseKey);
+            const isLocked = !isLicensed && trialDaysLeft <= 0;
+            const isTrial = !isLicensed && trialDaysLeft > 0;
+
+            // --- STORAGE CORE STATES ---
+            const [products, setProducts] = useState(() => { const local = localStorage.getItem('kbp_products_v7'); return local ? JSON.parse(local) : INITIAL_PRODUCTS; });
+            const [customers, setCustomers] = useState(() => { const local = localStorage.getItem('kbp_customers_v7'); return local ? JSON.parse(local) : INITIAL_CUSTOMERS; });
+            const [transactions, setTransactions] = useState(() => { const local = localStorage.getItem('kbp_transactions_v7'); return local ? JSON.parse(local) : INITIAL_TRANSACTIONS; });
+            const [shopConfig, setShopConfig] = useState(() => { const local = localStorage.getItem('kbp_shop_config_v7'); return local ? JSON.parse(local) : INITIAL_SHOP_CONFIG; });
+            const [waTemplates, setWaTemplates] = useState(() => { const local = localStorage.getItem('kbp_wa_templates_v7'); return local ? JSON.parse(local) : DEFAULT_WA_TEMPLATES; });
+            const [activeTemplateId, setActiveTemplateId] = useState(() => { return localStorage.getItem('kbp_active_template_id_v7') || 't-1'; });
+
+            // --- POS STATES ---
+            const [cart, setCart] = useState([]);
+            const [selectedCustomerId, setSelectedCustomerId] = useState('');
+            const [cashMethod, setCashMethod] = useState('Tunai'); 
+            const [cashPaidInput, setCashPaidInput] = useState(''); 
+            const [dueDaysSelection, setDueDaysSelection] = useState('7'); 
+            const [customDueDays, setCustomDueDays] = useState('15');
+            const [posDueDate, setPosDueDate] = useState(() => { const d = new Date(); d.setDate(d.getDate() + 7); return d.toISOString().slice(0, 10); });
+            
+            const [ppnPercent, setPpnPercent] = useState(0);
+            const [discountType, setDiscountType] = useState('nominal');
+            const [discountInput, setDiscountInput] = useState(0);
+            const [potongan, setPotongan] = useState(0);
+            const [trxDate, setTrxDate] = useState(() => { const now = new Date(); now.setMinutes(now.getMinutes() - now.getTimezoneOffset()); return now.toISOString().slice(0, 16); });
+            
+            const [posSearchQuery, setPosSearchQuery] = useState('');
+            const [customerSearchQuery, setCustomerSearchQuery] = useState('');
+            const [productSearchQuery, setProductSearchQuery] = useState('');
+            const [txFilterRange, setTxFilterRange] = useState('all'); 
+            const [filterStartDate, setFilterStartDate] = useState('');
+            const [filterEndDate, setFilterEndDate] = useState('');
+            const [debtFilterStatus, setDebtFilterStatus] = useState('all');
+            
+            const [calendarYear, setCalendarYear] = useState(new Date().getFullYear());
+            const [calendarMonth, setCalendarMonth] = useState(new Date().getMonth());
+            const [selectedCalendarDay, setSelectedCalendarDay] = useState(null);
+
+            const [customConfirmModal, setCustomConfirmModal] = useState({ isOpen: false, title: '', message: '', onConfirm: null });
+            const [activeReceipt, setActiveReceipt] = useState(null); 
+            const [isNewProductModalOpen, setIsNewProductModalOpen] = useState(false);
+            const [isNewCustomerModalOpen, setIsNewCustomerModalOpen] = useState(false);
+            const [isPayDebtModalOpen, setIsPayDebtModalOpen] = useState(false);
+            const [debtPaymentTarget, setDebtPaymentTarget] = useState(null); 
+            const [debtPaymentAmount, setDebtPaymentAmount] = useState('');
+            const [debtPaymentMethod, setDebtPaymentMethod] = useState('Tunai');
+            const [debtPaymentDate, setDebtPaymentDate] = useState(() => { const now = new Date(); now.setMinutes(now.getMinutes() - now.getTimezoneOffset()); return now.toISOString().slice(0, 16); });
+            const [toast, setToast] = useState(null);
+            const [expandedCustomerId, setExpandedCustomerId] = useState(null);
+
+            const [newProduct, setNewProduct] = useState({ name: '', price: '', unit: 'PCS' });
+            const [editingProduct, setEditingProduct] = useState(null);
+            const [newCustomer, setNewCustomer] = useState({ name: '', phone: '', address: '' });
+            const [editingCustomer, setEditingCustomer] = useState(null);
+            const [editingTemplate, setEditingTemplate] = useState(null);
+            const [newTemplate, setNewTemplate] = useState({ name: '', content: '' });
+            const [isNewTemplateModalOpen, setIsNewTemplateModalOpen] = useState(false);
+
+            const [pairedPrinter, setPairedPrinter] = useState(null);
+            const [printerDevice, setPrinterDevice] = useState(null);
+            const [printerCharacteristic, setPrinterCharacteristic] = useState(null);
+            const [printerLogs, setPrinterLogs] = useState([]);
+            const [isPrinterConnecting, setIsPrinterConnecting] = useState(false);
+
+            // --- LOCALSTORAGE SYNC ---
+            useEffect(() => { localStorage.setItem('kbp_products_v7', JSON.stringify(products)); }, [products]);
+            useEffect(() => { localStorage.setItem('kbp_customers_v7', JSON.stringify(customers)); }, [customers]);
+            useEffect(() => { localStorage.setItem('kbp_transactions_v7', JSON.stringify(transactions)); }, [transactions]);
+            useEffect(() => { localStorage.setItem('kbp_shop_config_v7', JSON.stringify(shopConfig)); }, [shopConfig]);
+            useEffect(() => { localStorage.setItem('kbp_wa_templates_v7', JSON.stringify(waTemplates)); }, [waTemplates]);
+            useEffect(() => { localStorage.setItem('kbp_active_template_id_v7', activeTemplateId); }, [activeTemplateId]);
+            useEffect(() => { localStorage.setItem('kbp_license_key_v7', licenseKey); }, [licenseKey]);
+
+            const showToast = (message, type = 'success') => { setToast({ message, type }); setTimeout(() => setToast(null), 3500); };
+            const triggerConfirm = (title, message, onConfirm) => { setCustomConfirmModal({ isOpen: true, title, message, onConfirm: () => { onConfirm(); setCustomConfirmModal(prev => ({ ...prev, isOpen: false })); } }); };
+
+            // --- LICENSE ACTIVATION HANDLER ---
+            const handleActivateLicense = (e) => {
+                e.preventDefault();
+                const inputKey = licenseInput.trim().toUpperCase();
+                if (validateLicenseKey(inputKey)) {
+                    setLicenseKey(inputKey);
+                    showToast('Lisensi Permanen Berhasil Diaktifkan!', 'success');
+                    setLicenseInput('');
+                } else {
+                    showToast('Kode Lisensi Tidak Valid/Salah!', 'error');
+                }
+            };
+
+            // --- EXPORT & IMPORT DATA SYSTEM ---
+            const handleExportData = () => {
+                const dataStr = JSON.stringify({ products, customers, transactions, shopConfig, waTemplates }, null, 2);
+                const link = document.createElement('a'); link.href = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
+                link.download = `BACKUP_KASBON_${new Date().toISOString().slice(0,10)}.json`; link.click(); showToast('Backup diunduh!');
+            };
+
+            const handleImportData = (e) => {
+                const fileReader = new FileReader();
+                if (e.target.files.length === 0) return;
+                fileReader.readAsText(e.target.files[0], "UTF-8");
+                fileReader.onload = (event) => {
+                    try {
+                        const parsed = JSON.parse(event.target.result);
+                        if (parsed.products && parsed.customers && parsed.transactions && parsed.shopConfig) {
+                            setProducts(parsed.products);
+                            setCustomers(parsed.customers);
+                            setTransactions(parsed.transactions);
+                            setShopConfig(parsed.shopConfig);
+                            if (parsed.waTemplates) setWaTemplates(parsed.waTemplates);
+                            showToast('Data berhasil dipulihkan!');
+                        } else {
+                            showToast('Format file backup tidak valid!', 'error');
+                        }
+                    } catch (err) {
+                        showToast('Gagal memproses file cadangan!', 'error');
+                    }
+                };
+            };
+
+            const handleExportCSV = () => {
+                let csvContent = "data:text/csv;charset=utf-8,ID Transaksi,Tanggal,Jatuh Tempo,Pelanggan,Metode Bayar,Subtotal,PPN,Diskon,Potongan,Total Akhir,Terbayar,Sisa Tagihan,Status\n";
+                transactions.forEach(tx => {
+                    const row = [
+                        tx.id, tx.date.slice(0, 10), tx.dueDate || '-', tx.customerName, tx.paymentMethod,
+                        tx.subtotal, tx.ppnAmount, tx.discountAmount, tx.potongan, tx.total,
+                        tx.cashPaid, tx.bonAmount, tx.status
+                    ].join(",");
+                    csvContent += row + "\n";
+                });
+                const encodedUri = encodeURI(csvContent);
+                const link = document.createElement("a");
+                link.setAttribute("href", encodedUri);
+                link.setAttribute("download", `LAPORAN_KASBON_PRO_V7.csv`);
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                showToast('Laporan penjualan CSV diunduh!');
+            };
+
+
+            // --- LOCK SCREEN UI ---
+            if (isLocked) {
+                return (
+                    <div className="flex flex-col items-center justify-center p-4">
+                        <div className="max-w-md w-full bg-slate-900 border border-slate-800 rounded-3xl p-8 shadow-2xl relative overflow-hidden mt-10">
+                            <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-rose-500 to-amber-500"></div>
+                            <div className="text-center space-y-4 mb-8">
+                                <div className="w-20 h-20 bg-rose-500/10 text-rose-500 rounded-full flex items-center justify-center mx-auto mb-4 border border-rose-500/20">
+                                    <Icon name="lock" size={40} />
+                                </div>
+                                <h1 className="text-2xl font-black tracking-tight text-white">Masa Trial Habis</h1>
+                                <p className="text-sm text-slate-400 leading-relaxed">
+                                    Masa percobaan 7 hari Anda untuk aplikasi <strong>Kas Bon POS Pro v7</strong> telah berakhir. Semua data Anda aman, silakan aktivasi lisensi untuk melanjutkan.
+                                </p>
+                            </div>
+                            <form onSubmit={handleActivateLicense} className="space-y-4">
+                                <div>
+                                    <label className="text-xs font-bold text-slate-400 block mb-2 uppercase tracking-wider">Masukkan Kode Lisensi</label>
+                                    <div className="relative">
+                                        <Icon name="key" className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500" size={18} />
+                                        <input 
+                                            type="text" 
+                                            value={licenseInput}
+                                            onChange={(e) => setLicenseInput(e.target.value)}
+                                            placeholder="Ketik kode aktivasi..."
+                                            className="w-full bg-slate-950 border border-slate-800 rounded-xl py-3 pl-11 pr-4 text-slate-100 placeholder-slate-600 focus:outline-none focus:border-amber-500 font-mono text-center tracking-widest uppercase"
+                                            required
+                                        />
+                                    </div>
+                                </div>
+                                <button type="submit" className="w-full bg-amber-500 hover:bg-amber-400 text-slate-950 font-black py-3.5 rounded-xl transition-all shadow-lg shadow-amber-500/20 active:scale-95 flex justify-center items-center gap-2">
+                                    Buka Kunci Aplikasi <Icon name="arrow-right" size={18} />
+                                </button>
+                            </form>
+                            <div className="mt-8 pt-6 border-t border-slate-800/60 text-center">
+                                <p className="text-xs text-slate-500">
+                                    Hubungi pengembang <strong className="text-amber-400">BIONE SELL</strong> untuk pembelian lisensi permanen.
+                                </p>
+                            </div>
+                        </div>
+
+                        {toast && (
+                            <div className="fixed top-5 right-5 z-50 flex items-center gap-3 bg-slate-900 border border-rose-500/40 text-slate-100 px-5 py-4 rounded-xl shadow-2xl animate-bounce">
+                                <Icon name="alert-triangle" className="text-rose-400" size={20} />
+                                <span className="font-semibold text-sm">{toast.message}</span>
+                            </div>
+                        )}
+                    </div>
+                );
+            }
+
+            // --- SAFE DYNAMIC DUE DATE ---
+            useEffect(() => {
+                if (dueDaysSelection !== 'custom') {
+                    const days = parseInt(dueDaysSelection, 10);
+                    const d = new Date(); d.setDate(d.getDate() + days);
+                    setPosDueDate(d.toISOString().slice(0, 10));
+                } else {
+                    const days = parseInt(customDueDays, 10) || 7;
+                    const d = new Date(); d.setDate(d.getDate() + days);
+                    setPosDueDate(d.toISOString().slice(0, 10));
+                }
+            }, [dueDaysSelection, customDueDays]);
+
+            const addPrinterLog = (msg) => { setPrinterLogs(prev => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...prev.slice(0, 15)]); };
+
+            const handlePairPrinter = async () => {
+                if (!navigator.bluetooth) {
+                    showToast('Browser ini tidak mendukung Web Bluetooth. Gunakan Chrome di Android/PC!', 'error');
+                    addPrinterLog('Bluetooth API tidak terdeteksi di browser ini.'); return;
+                }
+                setIsPrinterConnecting(true); addPrinterLog('Memulai pencarian printer bluetooth...');
+                try {
+                    const device = await navigator.bluetooth.requestDevice({
+                        filters: [{ services: ['000018f0-0000-1000-8000-00805f9b34fb'] }, { namePrefix: 'Printer' }, { namePrefix: 'MTP' }, { namePrefix: 'RPP' }, { namePrefix: 'PT' }],
+                        optionalServices: ['000018f0-0000-1000-8000-00805f9b34fb', '0000ff00-0000-1000-8000-00805f9b34fb', '00001101-0000-1000-8000-00805f9b34fb']
+                    });
+                    const server = await device.gatt.connect();
+                    const services = await server.getPrimaryServices();
+                    let selectedCharacteristic = null;
+                    for (const service of services) {
+                        const characteristics = await service.getCharacteristics();
+                        for (const char of characteristics) {
+                            if (char.properties.write || char.properties.writeWithoutResponse) { selectedCharacteristic = char; break; }
+                        }
+                        if (selectedCharacteristic) break;
+                    }
+                    if (!selectedCharacteristic) throw new Error('Karakteristik penulisan data printer tidak ditemukan.');
+                    setPrinterDevice(device); setPrinterCharacteristic(selectedCharacteristic); setPairedPrinter(device.name);
+                    showToast(`Printer ${device.name} Berhasil Terhubung!`, 'success');
+                    device.addEventListener('gattserverdisconnected', () => { setPairedPrinter(null); setPrinterCharacteristic(null); });
+                } catch (error) {
+                    if (error.name === 'SecurityError') showToast('Akses Bluetooth Ditolak! Silakan gunakan Print PDF.', 'error');
+                    else showToast(`Gagal pairing: ${error.message}`, 'error');
+                } finally { setIsPrinterConnecting(false); }
+            };
+
+            const handleDisconnectPrinter = () => {
+                if (printerDevice && printerDevice.gatt.connected) printerDevice.gatt.disconnect();
+                setPrinterDevice(null); setPrinterCharacteristic(null); setPairedPrinter(null);
+                showToast('Koneksi printer diputuskan.', 'info');
+            };
+
+            const triggerPrintReceipt = () => { window.print(); };
+
+            const encoder = new window.TextEncoder();
+            const sendRawToPrinter = async (text) => {
+                if (!printerCharacteristic) return false;
+                try {
+                    const bytes = encoder.encode(text);
+                    for (let i = 0; i < bytes.length; i += 20) await printerCharacteristic.writeValue(bytes.slice(i, i + 20));
+                    return true;
+                } catch (err) { return false; }
+            };
+
+            const handleTestPrint = async () => {
+                const testText = "\x1b\x61\x01\x1b\x45\x01KAS BON POS PRO\n" + shopConfig.name + "\n\x1b\x45\x00Sinyal Printer Terkoneksi Sempurna!\n\n\n\n";
+                const success = await sendRawToPrinter(testText);
+                if (success) showToast('Cetak sinyal test berhasil dikirim!', 'success');
+                else showToast('Koneksi printer fisik tidak aktif. Fallback cetak virtual dilakukan.', 'info');
+            };
+
+            const formatThermalLine = (left, right) => {
+                const spaceCount = 32 - left.length - right.length;
+                if (spaceCount <= 0) return left.substring(0, 32 - right.length - 1) + ' ' + right;
+                return left + ' '.repeat(spaceCount) + right;
+            };
+
+            const handlePrintEscPos = async (tx) => {
+                if (!tx) return;
+                let escTxt = "\x1b\x61\x01\x1b\x45\x01" + `${shopConfig.name}\n` + "\x1b\x45\x00" + `${shopConfig.address}\nWA: ${shopConfig.whatsapp}\n` + "-".repeat(32) + "\n\x1b\x61\x00"; 
+                escTxt += `Nota : ${tx.id}\nTgl  : ${formatDate(tx.date).slice(0, 16)}\n` + (tx.dueDate ? `Jatuh Tempo: ${tx.dueDate}\n` : '') + `Plg  : ${tx.customerName}\n` + "-".repeat(32) + "\n";
+                tx.items.forEach(item => {
+                    escTxt += `${item.name}\n` + formatThermalLine(`  ${item.qty} ${item.unit} x ${item.price.toLocaleString('id-ID')}`, (item.price * item.qty).toLocaleString('id-ID')) + "\n";
+                });
+                escTxt += "-".repeat(32) + "\n" + formatThermalLine("Subtotal:", tx.subtotal.toLocaleString('id-ID')) + "\n";
+                if (tx.ppnAmount > 0) escTxt += formatThermalLine(`PPN (${tx.ppnPercent}%):`, `+${tx.ppnAmount.toLocaleString('id-ID')}`) + "\n";
+                if (tx.discountAmount > 0) escTxt += formatThermalLine("Diskon:", `-${tx.discountAmount.toLocaleString('id-ID')}`) + "\n";
+                if (tx.potongan > 0) escTxt += formatThermalLine("Potongan:", `-${tx.potongan.toLocaleString('id-ID')}`) + "\n";
+                escTxt += "\x1b\x45\x01" + formatThermalLine("TOTAL AKHIR:", tx.total.toLocaleString('id-ID')) + "\n\x1b\x45\x00"; 
+                escTxt += formatThermalLine("Cash Dibayar:", tx.cashPaid.toLocaleString('id-ID')) + "\n";
+                if (tx.bonAmount > 0) escTxt += formatThermalLine("Sisa Bon (Utang):", tx.bonAmount.toLocaleString('id-ID')) + "\n";
+                if (tx.changeAmount > 0) escTxt += formatThermalLine("Kembalian:", tx.changeAmount.toLocaleString('id-ID')) + "\n";
+                escTxt += formatThermalLine("Status Pembayaran:", tx.status.toUpperCase()) + "\n" + "-".repeat(32) + "\n\x1b\x61\x01Terima Kasih Atas Kunjungan Anda\nKas Bon POS Pro v7\n\n\n\n";
+                
+                const success = await sendRawToPrinter(escTxt);
+                if (success) showToast('Cetak struk thermal berhasil!', 'success');
+                else window.print(); 
+            };
+
+            const parseWaTemplate = (templateContent, customerName, shopName, totalAmount, dueDate, itemsList) => {
+                if (!templateContent) return '';
+                return templateContent.replace(/{nama}/gi, customerName || 'Pelanggan').replace(/{toko}/gi, shopName || 'Toko Kami').replace(/{total}/gi, formatIDR(totalAmount)).replace(/{tanggal_jatuh_tempo}/gi, dueDate ? dueDate : 'Segera').replace(/{detail_bon}/gi, itemsList || '-');
+            };
+
+            const currentTemplate = useMemo(() => { return waTemplates.find(t => t.id === activeTemplateId) || waTemplates[0] || DEFAULT_WA_TEMPLATES[0]; }, [waTemplates, activeTemplateId]);
+
+            const sendWhatsAppReminder = (name, phone, amount, dueDate = '', detailText = '') => {
+                if (!phone) { showToast('Nomor WhatsApp pelanggan tidak diset!', 'error'); return; }
+                const rawMsg = parseWaTemplate(currentTemplate.content, name, shopConfig.name, amount, dueDate || 'Segera', detailText || 'Kewajiban belanja Kas Bon');
+                let cleanPhone = phone.replace(/[^0-9]/g, '');
+                if (cleanPhone.startsWith('0')) cleanPhone = '62' + cleanPhone.slice(1);
+                window.open(`https://wa.me/${cleanPhone}?text=${encodeURIComponent(rawMsg)}`, '_blank');
+            };
+
+            // FUNGSI SHARE STRUK SATUAN (PNG)
+            const handleShareReceiptImage = async (tx) => {
+                if (!tx) return;
+                try {
+                    const canvas = document.createElement('canvas'); const ctx = canvas.getContext('2d');
+                    const itemStartHeight = 190; const totalHeight = itemStartHeight + (tx.items.length * 24) + 280;
+                    canvas.width = 380; canvas.height = totalHeight;
+                    ctx.fillStyle = '#FFFFFF'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    ctx.strokeStyle = '#D1D5DB'; ctx.lineWidth = 2; ctx.strokeRect(2, 2, canvas.width - 4, canvas.height - 4);
+                    ctx.fillStyle = '#111827'; ctx.textAlign = 'center'; ctx.font = 'bold 18px monospace'; ctx.fillText(shopConfig.name, 190, 40);
+                    ctx.font = '11px monospace'; ctx.fillStyle = '#4B5563'; ctx.fillText(shopConfig.address, 190, 60); ctx.fillText(`WhatsApp: ${shopConfig.whatsapp}`, 190, 75);
+                    ctx.font = '12px monospace'; ctx.fillText("-".repeat(38), 190, 100);
+                    ctx.textAlign = 'left'; ctx.fillStyle = '#374151'; ctx.fillText(`Nota   : ${tx.id}`, 25, 118); ctx.fillText(`Tanggal: ${formatDate(tx.date).slice(0, 16)}`, 25, 132); ctx.fillText(`Kasir  : ${shopConfig.owner}`, 25, 146); ctx.fillText(`Plg    : ${tx.customerName}`, 25, 160);
+                    if (tx.dueDate) { ctx.fillStyle = '#DC2626'; ctx.font = 'bold 11px monospace'; ctx.fillText(`Jatuh Tempo: ${tx.dueDate}`, 25, 174); ctx.font = '11px monospace'; }
+                    ctx.fillStyle = '#374151'; ctx.textAlign = 'center'; ctx.fillText("-".repeat(38), 190, 185);
+                    
+                    let y = itemStartHeight + 10; ctx.textAlign = 'left';
+                    tx.items.forEach(item => {
+                        ctx.fillStyle = '#111827'; ctx.font = 'bold 11px monospace'; ctx.fillText(item.name, 25, y);
+                        y += 14; ctx.fillStyle = '#4B5563'; ctx.font = '11px monospace'; ctx.fillText(`${item.qty} ${item.unit} x ${formatIDR(item.price).replace('Rp', '').trim()}`, 25, y);
+                        ctx.textAlign = 'right'; ctx.fillText(formatIDR(item.price * item.qty).replace('Rp', '').trim(), 355, y);
+                        ctx.textAlign = 'left'; y += 14;
+                    });
+                    ctx.textAlign = 'center'; ctx.fillText("-".repeat(38), 190, y); y += 15; ctx.textAlign = 'left'; ctx.fillText("Subtotal:", 25, y); ctx.textAlign = 'right'; ctx.fillText(formatIDR(tx.subtotal).replace('Rp', '').trim(), 355, y);
+                    if (tx.ppnAmount > 0) { y += 15; ctx.textAlign = 'left'; ctx.fillText(`PPN (${tx.ppnPercent}%):`, 25, y); ctx.textAlign = 'right'; ctx.fillText(`+${formatIDR(tx.ppnAmount).replace('Rp', '').trim()}`, 355, y); }
+                    if (tx.discountAmount > 0) { y += 15; ctx.textAlign = 'left'; ctx.fillText("Diskon:", 25, y); ctx.textAlign = 'right'; ctx.fillText(`-${formatIDR(tx.discountAmount).replace('Rp', '').trim()}`, 355, y); }
+                    if (tx.potongan > 0) { y += 15; ctx.textAlign = 'left'; ctx.fillText("Potongan Tambahan:", 25, y); ctx.textAlign = 'right'; ctx.fillText(`-${formatIDR(tx.potongan).replace('Rp', '').trim()}`, 355, y); }
+                    y += 18; ctx.textAlign = 'center'; ctx.fillText("=".repeat(38), 190, y); y += 20; ctx.textAlign = 'left'; ctx.font = 'bold 13px monospace'; ctx.fillText("TOTAL AKHIR:", 25, y); ctx.textAlign = 'right'; ctx.fillText(formatIDR(tx.total), 355, y);
+                    y += 18; ctx.font = '11px monospace'; ctx.textAlign = 'left'; ctx.fillText("Cash Dibayar:", 25, y); ctx.textAlign = 'right'; ctx.fillText(formatIDR(tx.cashPaid).replace('Rp', '').trim(), 355, y);
+                    if (tx.bonAmount > 0) { y += 15; ctx.textAlign = 'left'; ctx.fillText("Sisa Bon (Utang):", 25, y); ctx.textAlign = 'right'; ctx.fillText(formatIDR(tx.bonAmount).replace('Rp', '').trim(), 355, y); }
+                    if (tx.changeAmount > 0) { y += 15; ctx.textAlign = 'left'; ctx.fillText("Uang Kembalian:", 25, y); ctx.textAlign = 'right'; ctx.fillText(formatIDR(tx.changeAmount).replace('Rp', '').trim(), 355, y); }
+                    y += 15; ctx.textAlign = 'left'; ctx.fillText("Status Nota:", 25, y); ctx.textAlign = 'right'; ctx.fillText(tx.status.toUpperCase(), 355, y);
+                    y += 30; ctx.textAlign = 'center'; ctx.fillStyle = '#6B7280'; ctx.fillText("Terima Kasih Atas Kunjungan Anda", 190, y); ctx.fillText("Aplikasi Kasir Kas Bon POS Pro v7", 190, y + 15);
+
+                    canvas.toBlob(async (blob) => {
+                        const file = new File([blob], `struk-${tx.id}.png`, { type: 'image/png' });
+                        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                            try { await navigator.share({ files: [file], title: `Struk Belanja ${tx.id}`, text: `Terima kasih.` }); showToast('Struk dibagikan!', 'success'); } catch (e) { triggerDirectDownload(blob, tx.id); }
+                        } else { triggerDirectDownload(blob, tx.id); }
+                    }, 'image/png');
+                } catch (err) { showToast('Gagal memproses gambar.', 'error'); }
+            };
+
+            // FUNGSI SHARE STRUK REKAP BANYAK NOTA (PNG)
+            const handleShareSummaryImage = async (customerObj) => {
+                if (!customerObj || !customerObj.transactionsList || customerObj.transactionsList.length === 0) {
+                    showToast('Tidak ada tagihan aktif untuk direkap!', 'error');
+                    return;
+                }
+                try {
+                    const canvas = document.createElement('canvas'); 
+                    const ctx = canvas.getContext('2d');
+                    
+                    const itemStartHeight = 190; 
+                    const rowHeight = 35; 
+                    const totalHeight = itemStartHeight + (customerObj.transactionsList.length * rowHeight) + 150;
+                    
+                    canvas.width = 400; 
+                    canvas.height = totalHeight;
+                    
+                    ctx.fillStyle = '#FFFFFF'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    ctx.strokeStyle = '#D1D5DB'; ctx.lineWidth = 2; ctx.strokeRect(2, 2, canvas.width - 4, canvas.height - 4);
+                    
+                    ctx.fillStyle = '#111827'; ctx.textAlign = 'center'; ctx.font = 'bold 20px monospace'; ctx.fillText(shopConfig.name, 200, 40);
+                    ctx.font = '12px monospace'; ctx.fillStyle = '#4B5563'; ctx.fillText(shopConfig.address, 200, 60); ctx.fillText(`WhatsApp: ${shopConfig.whatsapp}`, 200, 75);
+                    ctx.font = '14px monospace'; ctx.fillText("-".repeat(40), 200, 100);
+                    
+                    ctx.fillStyle = '#111827'; ctx.font = 'bold 16px monospace'; ctx.fillText("REKAP TAGIHAN KAS BON", 200, 125);
+                    ctx.textAlign = 'left'; ctx.font = '12px monospace'; ctx.fillStyle = '#374151'; 
+                    ctx.fillText(`Pelanggan : ${customerObj.name}`, 25, 150); 
+                    ctx.fillText(`No. WA    : ${customerObj.phone || '-'}`, 25, 165);
+                    ctx.textAlign = 'center'; ctx.fillText("-".repeat(40), 200, 180);
+                    
+                    let y = itemStartHeight; 
+                    ctx.textAlign = 'left';
+                    customerObj.transactionsList.forEach(tx => {
+                        ctx.fillStyle = '#111827'; ctx.font = 'bold 12px monospace'; ctx.fillText(`Nota: ${tx.id}`, 25, y);
+                        ctx.font = '10px monospace'; ctx.fillStyle = '#6B7280'; ctx.fillText(`${formatDate(tx.date).slice(0, 11)}`, 25, y + 14);
+                        ctx.textAlign = 'right'; ctx.fillStyle = '#DC2626'; ctx.font = 'bold 13px monospace'; 
+                        ctx.fillText(formatIDR(tx.calculatedRemaining).replace('Rp', '').trim(), 375, y + 8);
+                        ctx.textAlign = 'left'; y += rowHeight;
+                    });
+                    
+                    y += 5; ctx.textAlign = 'center'; ctx.fillStyle = '#374151'; ctx.fillText("-".repeat(40), 200, y);
+                    y += 25; ctx.textAlign = 'left'; ctx.fillStyle = '#111827'; ctx.font = 'bold 16px monospace'; ctx.fillText("TOTAL KESELURUHAN:", 25, y);
+                    ctx.textAlign = 'right'; ctx.fillStyle = '#DC2626'; ctx.fillText(formatIDR(customerObj.remainingDebt), 375, y);
+                    
+                    y += 40; ctx.textAlign = 'center'; ctx.fillStyle = '#6B7280'; ctx.font = '11px monospace'; 
+                    ctx.fillText("Mohon kesediaannya untuk segera melunasi.", 200, y); 
+                    ctx.fillText("Terima kasih 🙏", 200, y + 16);
+
+                    canvas.toBlob(async (blob) => {
+                        const file = new File([blob], `rekap-${customerObj.id}.png`, { type: 'image/png' });
+                        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                            try { await navigator.share({ files: [file], title: `Rekap Tagihan ${customerObj.name}`, text: `Berikut rekap tagihan belanja Anda.` }); showToast('Rekap dibagikan!', 'success'); } catch (e) { triggerDirectDownload(blob, `rekap-${customerObj.id}`); }
+                        } else { triggerDirectDownload(blob, `rekap-${customerObj.id}`); }
+                    }, 'image/png');
+                } catch (err) { showToast('Gagal memproses gambar rekap.', 'error'); }
+            };
+
+            const triggerDirectDownload = (blob, txId) => { const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `${txId}.png`; document.body.appendChild(link); link.click(); document.body.removeChild(link); URL.revokeObjectURL(url); };
+
+            const stats = useMemo(() => {
+                const todayStr = new Date().toDateString();
+                let totalSalesToday = 0; let totalCashReceived = 0; let totalOutstandingDebt = 0;
+                transactions.forEach(tx => {
+                    const txDate = new Date(tx.date).toDateString();
+                    if (txDate === todayStr && tx.paymentMethod !== 'Pembayaran Utang') totalSalesToday += tx.total;
+                    if (tx.status !== 'Lunas') { const paymentsTotal = tx.payments?.reduce((acc, pay) => acc + pay.amount, 0) || 0; totalOutstandingDebt += Math.max(0, tx.total - paymentsTotal); }
+                    tx.payments?.forEach(pay => { if (new Date(pay.date).toDateString() === todayStr) totalCashReceived += pay.amount; });
+                });
+                const customerDebts = {};
+                customers.forEach(c => { customerDebts[c.id] = { id: c.id, name: c.name, phone: c.phone, debt: 0 }; });
+                transactions.forEach(tx => {
+                    if (tx.customerId && tx.status !== 'Lunas') {
+                        if (!customerDebts[tx.customerId]) customerDebts[tx.customerId] = { id: tx.customerId, name: tx.customerName, phone: '', debt: 0 };
+                        const paymentsTotal = tx.payments?.reduce((acc, pay) => acc + pay.amount, 0) || 0;
+                        customerDebts[tx.customerId].debt += Math.max(0, tx.total - paymentsTotal);
+                    }
+                });
+                return { totalSalesToday, totalCashReceived, totalOutstandingDebt, topDebtors: Object.values(customerDebts).filter(item => item.debt > 0).sort((a, b) => b.debt - a.debt).slice(0, 5) };
+            }, [transactions, customers]);
+
+            const ledgerToday = useMemo(() => {
+                const todayStr = new Date().toDateString();
+                let cashInNetToday = 0; let newBonToday = 0; let splitPaymentCountToday = 0; let countTotalToday = 0;
+                transactions.forEach(tx => {
+                    if (new Date(tx.date).toDateString() === todayStr) { countTotalToday++; if (tx.paymentMethod !== 'Pembayaran Utang') { newBonToday += (tx.bonAmount || 0); if (tx.status === 'Sebagian') splitPaymentCountToday++; } }
+                    tx.payments?.forEach(pay => { if (new Date(pay.date).toDateString() === todayStr) cashInNetToday += pay.amount; });
+                });
+                return { cashInNetToday, newBonToday, splitPaymentCountToday, countTotalToday };
+            }, [transactions]);
+
+            const cartSubtotal = useMemo(() => cart.reduce((acc, item) => acc + (item.price * item.qty), 0), [cart]);
+            const ppnAmount = useMemo(() => cartSubtotal * (Number(ppnPercent) / 100), [cartSubtotal, ppnPercent]);
+            const discountAmount = useMemo(() => discountType === 'percent' ? (cartSubtotal + ppnAmount) * (Number(discountInput) / 100) : Number(discountInput), [cartSubtotal, ppnAmount, discountType, discountInput]);
+            const cartTotal = useMemo(() => Math.max(0, (cartSubtotal + ppnAmount) - discountAmount - Number(potongan)), [cartSubtotal, ppnAmount, discountAmount, potongan]);
+            const cashPaidVal = useMemo(() => isNaN(parseFloat(cashPaidInput)) ? 0 : parseFloat(cashPaidInput), [cashPaidInput]);
+            const derivedStatus = useMemo(() => cashPaidVal >= cartTotal ? 'Lunas' : cashPaidVal > 0 ? 'Sebagian' : 'BON', [cashPaidVal, cartTotal]);
+            const derivedBonAmount = useMemo(() => cashPaidVal < cartTotal ? Math.max(0, cartTotal - cashPaidVal) : 0, [cashPaidVal, cartTotal]);
+            const derivedChangeAmount = useMemo(() => cashPaidVal > cartTotal ? Math.max(0, cashPaidVal - cartTotal) : 0, [cashPaidVal, cartTotal]);
+            useEffect(() => { setCashPaidInput(cartTotal.toString()); }, [cartTotal]);
+
+            const handleAddToCart = (product) => {
+                const existing = cart.find(item => item.id === product.id);
+                if (existing) setCart(cart.map(item => item.id === product.id ? { ...item, qty: item.qty + 1 } : item));
+                else setCart([...cart, { ...product, qty: 1 }]);
+            };
+            const handleUpdateQty = (productId, qtyValue) => {
+                const parsedQty = parseFloat(qtyValue);
+                setCart(cart.map(item => item.id === productId ? { ...item, qty: isNaN(parsedQty) || parsedQty <= 0 ? qtyValue : parsedQty } : item));
+            };
+            const handleAdjustQtyStep = (productId, step) => {
+                const item = cart.find(i => i.id === productId); if (!item) return;
+                let newQty = Math.max(0, parseFloat((parseFloat(item.qty) || 0) + step).toFixed(3));
+                if (newQty <= 0) setCart(cart.filter(i => i.id !== productId));
+                else setCart(cart.map(i => i.id === productId ? { ...i, qty: newQty } : i));
+            };
+            const handleBlurQty = (productId, qty) => {
+                const parsed = parseFloat(qty);
+                if (isNaN(parsed) || parsed <= 0) setCart(cart.filter(item => item.id !== productId));
+                else setCart(cart.map(item => item.id === productId ? { ...item, qty: parsed } : item));
+            };
+            const handleRemoveFromCart = (productId) => setCart(cart.filter(item => item.id !== productId));
+
+            const handleCheckout = () => {
+                if (cart.length === 0) { showToast('Keranjang belanja kosong!', 'error'); return; }
+                if (cart.some(item => isNaN(parseFloat(item.qty)) || parseFloat(item.qty) <= 0)) { showToast('Ada Qty tidak valid!', 'error'); return; }
+                if (derivedBonAmount > 0 && !selectedCustomerId) { showToast(`Sisa bayar ${formatIDR(derivedBonAmount)} jadi Bon. Wajib pilih pelanggan!`, 'error'); return; }
+                if (!trxDate) { showToast('Tanggal transaksi tidak boleh kosong!', 'error'); return; }
+
+                const cName = customers.find(c => c.id === selectedCustomerId)?.name || 'Pelanggan Umum';
+                const ISOTrxDate = new Date(trxDate).toISOString();
+                const initialPayments = []; let netCashKept = 0;
+                if (cashPaidVal > 0) {
+                    netCashKept = Math.min(cashPaidVal, cartTotal);
+                    initialPayments.push({ id: `pay-${Date.now()}`, date: ISOTrxDate, amount: netCashKept, method: cashMethod });
+                }
+
+                const newTx = {
+                    id: `TRX-${Date.now().toString().slice(-6)}`, date: ISOTrxDate, dueDate: derivedBonAmount > 0 ? posDueDate : null,
+                    items: cart.map(item => ({ ...item, qty: parseFloat(item.qty) })), subtotal: cartSubtotal, ppnPercent: Number(ppnPercent), ppnAmount,
+                    discountType, discountInput: Number(discountInput), discountAmount, potongan: Number(potongan), total: cartTotal,
+                    cashPaid: cashPaidVal, bonAmount: derivedBonAmount, changeAmount: derivedChangeAmount,
+                    paymentMethod: derivedBonAmount > 0 ? (cashPaidVal > 0 ? 'Kas Bon (Split)' : 'Kas Bon (Full)') : cashMethod,
+                    customerId: selectedCustomerId || null, customerName: cName, paidAmount: netCashKept, status: derivedStatus,
+                    settledDate: derivedStatus === 'Lunas' ? ISOTrxDate : null, payments: initialPayments
+                };
+
+                setTransactions([newTx, ...transactions]); setCart([]); setPpnPercent(0); setDiscountInput(0); setPotongan(0); setSelectedCustomerId(''); setCashPaidInput(''); setCashMethod('Tunai');
+                const now = new Date(); now.setMinutes(now.getMinutes() - now.getTimezoneOffset()); setTrxDate(now.toISOString().slice(0, 16));
+                setActiveReceipt(newTx); showToast('Transaksi Disimpan!', 'success');
+            };
+
+            const getDueDateStatus = (dueDateString) => {
+                if (!dueDateString) return { text: 'Aman', color: 'text-emerald-400 bg-emerald-500/10' };
+                const today = new Date(); today.setHours(0,0,0,0); const due = new Date(dueDateString); due.setHours(0,0,0,0);
+                const diffDays = Math.ceil((due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+                if (diffDays < 0) return { text: 'Lewat Jatuh Tempo (Overdue)', color: 'text-rose-400 bg-rose-500/10 border border-rose-500/20' };
+                else if (diffDays <= 3) return { text: 'Mendekati Jatuh Tempo', color: 'text-amber-400 bg-amber-500/10 border border-amber-500/20' };
+                else return { text: 'Aman (Lancar)', color: 'text-emerald-400 bg-emerald-500/10 border border-emerald-500/20' };
+            };
+
+            const activeDebts = useMemo(() => {
+                const list = {}; customers.forEach(c => { list[c.id] = { ...c, totalDebt: 0, paid: 0, transactionsList: [] }; });
+                transactions.forEach(tx => {
+                    if (tx.customerId && tx.bonAmount > 0) {
+                        if (!list[tx.customerId]) list[tx.customerId] = { id: tx.customerId, name: tx.customerName, phone: '', address: '', totalDebt: 0, paid: 0, transactionsList: [] };
+                        const paymentsTotal = tx.payments?.reduce((acc, pay) => acc + pay.amount, 0) || 0;
+                        list[tx.customerId].totalDebt += tx.total; list[tx.customerId].paid += paymentsTotal;
+                        const rem = Math.max(0, tx.total - paymentsTotal);
+                        if (rem > 0) list[tx.customerId].transactionsList.push({ ...tx, calculatedPaid: paymentsTotal, calculatedRemaining: rem, dueState: getDueDateStatus(tx.dueDate) });
+                    }
+                });
+                return Object.values(list).map(item => {
+                    const remaining = Math.max(0, item.totalDebt - item.paid);
+                    let overallStatus = 'Aman';
+                    if (item.transactionsList.some(tx => tx.dueState.text.includes('Overdue'))) overallStatus = 'Overdue';
+                    else if (item.transactionsList.some(tx => tx.dueState.text.includes('Mendekati'))) overallStatus = 'Mendekati';
+                    return { ...item, remainingDebt: remaining, overallStatus };
+                }).filter(item => item.remainingDebt > 0);
+            }, [transactions, customers]);
+
+            const filteredActiveDebts = useMemo(() => activeDebts.filter(d => debtFilterStatus === 'all' ? true : d.overallStatus.toLowerCase() === debtFilterStatus), [activeDebts, debtFilterStatus]);
+
+            const handlePayDebtSpecific = () => {
+                const amount = Number(debtPaymentAmount);
+                if (!debtPaymentTarget || isNaN(amount) || amount <= 0) { showToast('Masukkan nominal valid!', 'error'); return; }
+                const txRemaining = debtPaymentTarget.total - (debtPaymentTarget.payments?.reduce((acc, pay) => acc + pay.amount, 0) || 0);
+                if (amount > txRemaining) { showToast(`Nominal melebihi sisa (${formatIDR(txRemaining)})!`, 'error'); return; }
+                if (!debtPaymentDate) { showToast('Masukkan tanggal!', 'error'); return; }
+
+                const ISOStrPayDate = new Date(debtPaymentDate).toISOString();
+                const updatedTransactions = transactions.map(tx => {
+                    if (tx.id === debtPaymentTarget.id) {
+                        const updatedPayments = tx.payments ? [...tx.payments] : [];
+                        updatedPayments.push({ id: `pay-${Date.now()}`, date: ISOStrPayDate, amount: amount, method: debtPaymentMethod });
+                        const newPaidAmount = updatedPayments.reduce((acc, pay) => acc + pay.amount, 0);
+                        return { ...tx, paidAmount: newPaidAmount, status: newPaidAmount >= tx.total ? 'Lunas' : 'Sebagian', settledDate: newPaidAmount >= tx.total ? ISOStrPayDate : null, payments: updatedPayments };
+                    }
+                    return tx;
+                });
+                setTransactions(updatedTransactions); setIsPayDebtModalOpen(false); setDebtPaymentTarget(null); setDebtPaymentAmount(''); showToast(`Cicilan ${formatIDR(amount)} disimpan!`, 'success');
+            };
+
+            const handleAddProduct = (e) => { e.preventDefault(); if (!newProduct.name || !newProduct.price) { showToast('Isi nama dan harga!', 'error'); return; } setProducts([...products, { id: `p-${Date.now()}`, name: newProduct.name, price: Number(newProduct.price), unit: newProduct.unit || 'PCS' }]); setNewProduct({ name: '', price: '', unit: 'PCS' }); setIsNewProductModalOpen(false); showToast('Produk ditambahkan!'); };
+            const handleEditProduct = (e) => { e.preventDefault(); if (!editingProduct.name || !editingProduct.price) { showToast('Isi nama dan harga!', 'error'); return; } setProducts(products.map(p => p.id === editingProduct.id ? { ...editingProduct, price: Number(editingProduct.price) } : p)); setEditingProduct(null); showToast('Produk diperbarui!'); };
+            const handleDeleteProduct = (id) => { triggerConfirm('Hapus', 'Yakin hapus produk?', () => { setProducts(products.filter(p => p.id !== id)); showToast('Produk dihapus!'); }); };
+            const handleAddCustomer = (e) => { e.preventDefault(); if (!newCustomer.name || !newCustomer.phone) { showToast('Nama & WA wajib!', 'error'); return; } setCustomers([...customers, { id: `c-${Date.now()}`, ...newCustomer }]); setNewCustomer({ name: '', phone: '', address: '' }); setIsNewCustomerModalOpen(false); showToast('Pelanggan ditambah!'); };
+            const handleEditCustomer = (e) => { e.preventDefault(); if (!editingCustomer.name || !editingCustomer.phone) { showToast('Nama & WA wajib!', 'error'); return; } setCustomers(customers.map(c => c.id === editingCustomer.id ? editingCustomer : c)); setEditingCustomer(null); showToast('Pelanggan diperbarui!'); };
+            const handleDeleteCustomer = (id) => { triggerConfirm('Hapus', 'Yakin hapus pelanggan?', () => { setCustomers(customers.filter(c => c.id !== id)); showToast('Pelanggan dihapus!'); }); };
+            const handleAddTemplate = (e) => { e.preventDefault(); if (!newTemplate.name || !newTemplate.content) { showToast('Isi form!', 'error'); return; } setWaTemplates([...waTemplates, { id: `t-${Date.now()}`, ...newTemplate }]); setNewTemplate({ name: '', content: '' }); setIsNewTemplateModalOpen(false); showToast('Template disimpan!'); };
+            const handleEditTemplate = (e) => { e.preventDefault(); if (!editingTemplate.name || !editingTemplate.content) { showToast('Isi form!', 'error'); return; } setWaTemplates(waTemplates.map(t => t.id === editingTemplate.id ? editingTemplate : t)); setEditingTemplate(null); showToast('Template diperbarui!'); };
+            const handleDeleteTemplate = (id) => { if (id.startsWith('t-1')) { showToast('Template default tidak bisa dihapus!', 'error'); return; } triggerConfirm('Hapus', 'Yakin hapus template?', () => { setWaTemplates(waTemplates.filter(t => t.id !== id)); if (activeTemplateId === id) setActiveTemplateId('t-1'); showToast('Template dihapus!'); }); };
+
+            const daysInMonth = useMemo(() => new Date(calendarYear, calendarMonth + 1, 0).getDate(), [calendarYear, calendarMonth]);
+            const firstDayOfMonth = useMemo(() => new Date(calendarYear, calendarMonth, 1).getDay(), [calendarYear, calendarMonth]);
+            const monthNames = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
+            const changeCalendarMonth = (dir) => { if (dir === 'prev') { if (calendarMonth === 0) { setCalendarMonth(11); setCalendarYear(calendarYear - 1); } else setCalendarMonth(calendarMonth - 1); } else { if (calendarMonth === 11) { setCalendarMonth(0); setCalendarYear(calendarYear + 1); } else setCalendarMonth(calendarMonth + 1); } setSelectedCalendarDay(null); };
+            const calendarDebtsMap = useMemo(() => { const map = {}; transactions.forEach(tx => { if (tx.dueDate && tx.status !== 'Lunas') { if (!map[tx.dueDate]) map[tx.dueDate] = []; map[tx.dueDate].push(tx); } }); return map; }, [transactions]);
+
+            const handleBulkReminder = () => {
+                const overdues = activeDebts.filter(d => d.overallStatus === 'Overdue');
+                if (overdues.length === 0) { showToast('Tidak ada Overdue!', 'info'); return; }
+                triggerConfirm('Bulk Reminder', `Kirim ke ${overdues.length} pelanggan?`, () => {
+                    overdues.forEach((debtor, index) => {
+                        setTimeout(() => {
+                            sendWhatsAppReminder(debtor.name, debtor.phone, debtor.remainingDebt, debtor.transactionsList[0]?.dueDate, debtor.transactionsList.map(tx => tx.items.map(it => `${it.qty} ${it.unit} ${it.name}`).join(', ')).join('; '));
+                        }, index * 1000);
+                    });
+                    showToast('Bulk reminder diproses!');
+                });
+            };
+
+            const filteredProducts = products.filter(p => p.name.toLowerCase().includes(productSearchQuery.toLowerCase()));
+            const filteredPOSProducts = products.filter(p => p.name.toLowerCase().includes(posSearchQuery.toLowerCase()));
+            const filteredCustomers = customers.filter(c => c.name.toLowerCase().includes(customerSearchQuery.toLowerCase()) || c.phone.includes(customerSearchQuery));
+            const filteredTransactions = useMemo(() => {
+                const now = new Date();
+                return transactions.filter(tx => {
+                    const txDate = new Date(tx.date);
+                    if (txFilterRange === 'daily') return txDate.toDateString() === now.toDateString();
+                    if (txFilterRange === 'weekly') return Math.ceil(Math.abs(now - txDate) / (1000 * 60 * 60 * 24)) <= 7;
+                    if (txFilterRange === 'monthly') return txDate.getMonth() === now.getMonth() && txDate.getFullYear() === now.getFullYear();
+                    if (txFilterRange === 'custom' && filterStartDate && filterEndDate) { const end = new Date(filterEndDate); end.setHours(23, 59, 59, 999); return txDate >= new Date(filterStartDate) && txDate <= end; }
+                    return true;
+                });
+            }, [transactions, txFilterRange, filterStartDate, filterEndDate]);
+
+
+            return (
+                <div className="flex flex-col min-h-screen">
+                    {/* Toast Alert */}
+                    {toast && (
+                        <div className="fixed top-5 right-5 z-50 flex items-center gap-3 bg-slate-900 border border-amber-500/40 text-slate-100 px-5 py-4 rounded-xl shadow-2xl animate-bounce backdrop-blur print:hidden">
+                            <Icon name="sparkles" className="text-amber-400" size={20} />
+                            <span className="font-semibold text-sm">{toast.message}</span>
+                        </div>
+                    )}
+
+                    {/* TRIAL BANNER */}
+                    {isTrial && (
+                        <div className="bg-gradient-to-r from-amber-500 to-yellow-600 text-slate-950 px-4 py-2 text-center text-xs font-bold flex justify-center items-center gap-2 print:hidden z-50 relative shadow-lg">
+                            <Icon name="clock" size={14} className="animate-pulse" />
+                            <span>MODE TRIAL: Sisa waktu coba gratis {trialDaysLeft} Hari. </span>
+                            <button onClick={() => setActiveTab('pengaturan')} className="bg-slate-950 text-amber-400 px-3 py-1 rounded-full text-[10px] uppercase hover:bg-slate-800 transition-all ml-2">Aktivasi Lisensi</button>
+                        </div>
+                    )}
+
+                    {/* Custom Confirmation Modal */}
+                    {customConfirmModal.isOpen && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm print:hidden">
+                            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 max-w-sm w-full space-y-4 shadow-2xl">
+                                <div className="flex items-center gap-3 text-amber-400">
+                                    <Icon name="alert-circle" size={24} />
+                                    <h4 className="font-bold text-slate-100">{customConfirmModal.title}</h4>
+                                </div>
+                                <p className="text-xs text-slate-400 leading-relaxed">{customConfirmModal.message}</p>
+                                <div className="flex gap-3 pt-2">
+                                    <button onClick={() => setCustomConfirmModal(prev => ({ ...prev, isOpen: false }))} className="flex-1 bg-slate-800 hover:bg-slate-750 text-slate-300 py-2 rounded-lg text-xs font-bold">Batal</button>
+                                    <button onClick={customConfirmModal.onConfirm} className="flex-1 bg-amber-500 hover:bg-amber-400 text-slate-950 py-2 rounded-lg text-xs font-black">Ya, Konfirmasi</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* --- DESKTOP HEADER --- */}
+                    <header className="bg-slate-900/80 border-b border-slate-800 backdrop-blur sticky top-0 z-30 px-4 py-4 md:px-8 print:hidden">
+                        <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
+                            <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 bg-gradient-to-tr from-amber-500 to-amber-600 rounded-xl flex items-center justify-center shadow-lg shadow-amber-500/20">
+                                    <span className="font-bold text-slate-950 text-xl tracking-tight">K</span>
+                                </div>
+                                <div>
+                                    <h1 className="text-xl font-extrabold tracking-wider bg-gradient-to-r from-amber-400 to-yellow-200 bg-clip-text text-transparent flex items-center gap-2">
+                                        {shopConfig.name}
+                                    </h1>
+                                    <p className="text-xs text-slate-400 font-medium">Sistem POS Kasir, Kas Bon, Kalender Jatuh Tempo &amp; Advanced WA v7.0</p>
+                                </div>
+                            </div>
+
+                            <div className="flex items-center gap-4 text-sm flex-wrap">
+                                {isLicensed && (
+                                    <div className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded-lg text-[10px] font-black uppercase tracking-wider">
+                                        <Icon name="check" size={12} /> Pro Lisensi Aktif
+                                    </div>
+                                )}
+                                <div className="flex items-center gap-2 bg-slate-950 px-3 py-1.5 rounded-lg border border-slate-800">
+                                    {pairedPrinter ? (
+                                        <>
+                                            <Icon name="wifi" className="text-emerald-400 animate-pulse" size={16} />
+                                            <span className="text-xs font-bold text-slate-300 truncate max-w-[120px]">{pairedPrinter}</span>
+                                            <button onClick={handleDisconnectPrinter} className="text-[10px] text-rose-400 hover:underline pl-1 ml-1 border-l border-slate-800">Disconnect</button>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <Icon name="wifi-off" className="text-slate-500" size={16} />
+                                            <span className="text-xs text-slate-500 font-semibold text-slate-400">Thermal Printer</span>
+                                            <button onClick={handlePairPrinter} className="text-[10px] text-amber-400 hover:underline ml-2 font-bold">{isPrinterConnecting ? 'Menghubungkan...' : 'Hubungkan'}</button>
+                                        </>
+                                    )}
+                                </div>
+                                <div className="hidden lg:block border-l border-slate-800 pl-4">
+                                    <span className="text-xs text-slate-500 block">Kasir Aktif</span>
+                                    <span className="font-semibold text-slate-300">{shopConfig.owner || 'Kasir'}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </header>
+
+                    {/* --- LAYOUT BODY --- */}
+                    <div className="flex-1 flex flex-col md:flex-row max-w-7xl w-full mx-auto p-4 md:p-6 gap-6 print:p-0">
+                        
+                        {/* --- SIDEBAR --- */}
+                        <aside className="md:w-64 w-full shrink-0 print:hidden">
+                            <nav className="flex flex-row md:flex-col gap-2 overflow-x-auto md:overflow-x-visible pb-3 md:pb-0 scrollbar-none sticky top-24">
+                                <button onClick={() => setActiveTab('dashboard')} className={`flex items-center gap-3 px-4 py-3 rounded-xl font-bold text-sm tracking-wide transition-all shrink-0 ${activeTab === 'dashboard' ? 'bg-amber-500 text-slate-950 shadow-lg shadow-amber-500/15' : 'bg-slate-900/50 text-slate-400 hover:bg-slate-900 hover:text-slate-100'}`}>
+                                    <Icon name="layout-dashboard" size={18} /><span>Dashboard</span>
+                                </button>
+                                <button onClick={() => setActiveTab('pos')} className={`flex items-center gap-3 px-4 py-3 rounded-xl font-bold text-sm tracking-wide transition-all shrink-0 ${activeTab === 'pos' ? 'bg-amber-500 text-slate-950 shadow-lg shadow-amber-500/15' : 'bg-slate-900/50 text-slate-400 hover:bg-slate-900 hover:text-slate-100'}`}>
+                                    <Icon name="shopping-cart" size={18} /><span>POS Kasir</span>
+                                </button>
+                                <button onClick={() => setActiveTab('kasbon')} className={`flex items-center gap-3 px-4 py-3 rounded-xl font-bold text-sm tracking-wide transition-all shrink-0 ${activeTab === 'kasbon' ? 'bg-amber-500 text-slate-950 shadow-lg shadow-amber-500/15' : 'bg-slate-900/50 text-slate-400 hover:bg-slate-900 hover:text-slate-100'}`}>
+                                    <Icon name="credit-card" size={18} /><span>Buku Kas Bon</span>
+                                </button>
+                                <button onClick={() => setActiveTab('pelanggan')} className={`flex items-center gap-3 px-4 py-3 rounded-xl font-bold text-sm tracking-wide transition-all shrink-0 ${activeTab === 'pelanggan' ? 'bg-amber-500 text-slate-950 shadow-lg shadow-amber-500/15' : 'bg-slate-900/50 text-slate-400 hover:bg-slate-900 hover:text-slate-100'}`}>
+                                    <Icon name="users" size={18} /><span>Pelanggan</span>
+                                </button>
+                                <button onClick={() => setActiveTab('riwayat')} className={`flex items-center gap-3 px-4 py-3 rounded-xl font-bold text-sm tracking-wide transition-all shrink-0 ${activeTab === 'riwayat' ? 'bg-amber-500 text-slate-950 shadow-lg shadow-amber-500/15' : 'bg-slate-900/50 text-slate-400 hover:bg-slate-900 hover:text-slate-100'}`}>
+                                    <Icon name="history" size={18} /><span>Riwayat Transaksi</span>
+                                </button>
+                                <button onClick={() => setActiveTab('reminder')} className={`flex items-center gap-3 px-4 py-3 rounded-xl font-bold text-sm tracking-wide transition-all shrink-0 ${activeTab === 'reminder' ? 'bg-amber-500 text-slate-950 shadow-lg shadow-amber-500/15' : 'bg-slate-900/50 text-slate-400 hover:bg-slate-900 hover:text-slate-100'}`}>
+                                    <Icon name="message-square" size={18} /><span>WA Advanced</span>
+                                </button>
+                                <button onClick={() => setActiveTab('pengaturan')} className={`flex items-center gap-3 px-4 py-3 rounded-xl font-bold text-sm tracking-wide transition-all shrink-0 ${activeTab === 'pengaturan' ? 'bg-amber-500 text-slate-950 shadow-lg shadow-amber-500/15' : 'bg-slate-900/50 text-slate-400 hover:bg-slate-900 hover:text-slate-100'}`}>
+                                    <Icon name="settings" size={18} /><span>Pengaturan Toko</span>
+                                </button>
+                            </nav>
+                        </aside>
+
+                        {/* --- MAIN CONTENT WINDOW --- */}
+                        <main className="flex-1 bg-slate-900/20 rounded-2xl border border-slate-800/60 p-4 md:p-6 flex flex-col justify-between print:bg-white print:border-none print:p-0">
+                            
+                            {/* TAB 1: DASHBOARD */}
+                            {activeTab === 'dashboard' && (
+                                <div className="space-y-6">
+                                    <div className="relative overflow-hidden bg-gradient-to-r from-slate-900 to-indigo-950 border border-slate-800 rounded-2xl p-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                                        <div className="absolute right-0 top-0 w-32 h-32 bg-amber-500/5 rounded-full blur-2xl"></div>
+                                        <div>
+                                            <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+                                                Selamat Datang, <span className="text-amber-400">{shopConfig.owner || 'Kasir'}</span>!
+                                            </h2>
+                                            <p className="text-sm text-slate-400 mt-1">Sistem POS dengan kontrol piutang Kas Bon, Kalender Jatuh Tempo &amp; Advanced WA Reminder.</p>
+                                        </div>
+                                        <button onClick={() => setActiveTab('pos')} className="bg-amber-500 hover:bg-amber-400 text-slate-950 px-5 py-2.5 rounded-xl font-extrabold text-sm flex items-center gap-2 shadow-lg shadow-amber-500/20 active:scale-95 transition-all">
+                                            <Icon name="shopping-cart" size={16} /> Mulai Kasir POS
+                                        </button>
+                                    </div>
+
+                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+                                        <div className="bg-slate-900 border border-slate-800/80 rounded-2xl p-5 shadow-sm relative overflow-hidden">
+                                            <div className="flex justify-between items-start">
+                                                <div>
+                                                    <span className="text-xs text-slate-400 font-semibold uppercase tracking-wider block">Penjualan Hari Ini</span>
+                                                    <h3 className="text-2xl font-black text-amber-400 mt-2">{formatIDR(stats.totalSalesToday)}</h3>
+                                                </div>
+                                                <div className="p-3 bg-amber-500/10 text-amber-400 rounded-xl"><Icon name="trending-up" size={22} /></div>
+                                            </div>
+                                        </div>
+
+                                        <div className="bg-slate-900 border border-slate-800/80 rounded-2xl p-5 shadow-sm relative overflow-hidden">
+                                            <div className="flex justify-between items-start">
+                                                <div>
+                                                    <span className="text-xs text-slate-400 font-semibold uppercase tracking-wider block">Total Kas Masuk</span>
+                                                    <h3 className="text-2xl font-black text-emerald-400 mt-2">{formatIDR(stats.totalCashReceived)}</h3>
+                                                </div>
+                                                <div className="p-3 bg-emerald-500/10 text-emerald-400 rounded-xl"><Icon name="dollar-sign" size={22} /></div>
+                                            </div>
+                                        </div>
+
+                                        <div className="bg-slate-900 border border-slate-800/80 rounded-2xl p-5 shadow-sm relative overflow-hidden">
+                                            <div className="flex justify-between items-start">
+                                                <div>
+                                                    <span className="text-xs text-slate-400 font-semibold uppercase tracking-wider block">Sisa Piutang Aktif</span>
+                                                    <h3 className="text-2xl font-black text-rose-500 mt-2">{formatIDR(stats.totalOutstandingDebt)}</h3>
+                                                </div>
+                                                <div className="p-3 bg-rose-500/10 text-rose-500 rounded-xl"><Icon name="alert-triangle" size={22} /></div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                                        <div className="bg-slate-900 border border-slate-800/80 rounded-2xl p-5">
+                                            <div className="flex justify-between items-center mb-4">
+                                                <h4 className="font-bold text-slate-200">Pelanggan Tunggakan Terbesar</h4>
+                                                <button onClick={() => setActiveTab('kasbon')} className="text-xs text-amber-400 hover:underline">Semua Kas Bon &rarr;</button>
+                                            </div>
+                                            {stats.topDebtors.length === 0 ? (
+                                                <div className="py-8 text-center text-slate-500 text-sm">Semua pelanggan lunas atau tidak ada data kas bon.</div>
+                                            ) : (
+                                                <div className="space-y-3">
+                                                    {stats.topDebtors.map((debtor) => (
+                                                        <div key={debtor.id} className="flex items-center justify-between p-3 bg-slate-950 rounded-xl border border-slate-800/40">
+                                                            <div>
+                                                                <span className="font-bold text-sm text-slate-100 block">{debtor.name}</span>
+                                                                <span className="text-xs text-slate-400">{debtor.phone || 'Tanpa WA'}</span>
+                                                            </div>
+                                                            <div className="flex items-center gap-3">
+                                                                <span className="text-rose-400 font-bold text-sm">{formatIDR(debtor.debt)}</span>
+                                                                <button onClick={() => sendWhatsAppReminder(debtor.name, debtor.phone, debtor.debt)} className="p-1.5 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500 hover:text-slate-950 rounded-lg transition-all"><Icon name="message-square" size={14} /></button>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        <div className="bg-slate-900 border border-slate-800/80 rounded-2xl p-5 flex flex-col justify-between">
+                                            <div>
+                                                <h4 className="font-bold text-slate-200 mb-2">Panduan Penggunaan ERP Kasir v7</h4>
+                                                <p className="text-xs text-slate-400 leading-relaxed font-medium mb-3">
+                                                    Sistem penagihan Kas Bon Pro kini memiliki Kalender Jatuh Tempo interaktif dan Export HTML Statis!
+                                                </p>
+                                                <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl flex items-center justify-between text-xs">
+                                                    <div>
+                                                        <span className="font-bold text-slate-300 block">Status Lisensi</span>
+                                                        <span className={isLicensed ? "text-emerald-400 font-bold" : "text-amber-400 font-bold"}>
+                                                            {isLicensed ? 'PRO / Permanen Aktif' : `TRIAL (${trialDaysLeft} Hari Tersisa)`}
+                                                        </span>
+                                                    </div>
+                                                    {!isLicensed && (
+                                                        <button onClick={() => setActiveTab('pengaturan')} className="px-3 py-1.5 bg-amber-500 text-slate-950 font-bold rounded-lg hover:bg-amber-400">Aktivasi</button>
+                                                    )}
+                                                </div>
+                                            </div>
+                                            
+                                            <div className="pt-4 border-t border-slate-800 flex flex-wrap gap-2">
+                                                <button onClick={handleExportData} className="flex-1 bg-slate-950 hover:bg-slate-800 text-slate-300 text-xs py-2 px-3 rounded-lg border border-slate-800 flex items-center justify-center gap-1.5 font-semibold">
+                                                    <Icon name="download" size={12} /> Ekspor Backup (.json)
+                                                </button>
+                                                <label className="flex-1 bg-slate-950 hover:bg-slate-800 text-slate-300 text-xs py-2 px-3 rounded-lg border border-slate-800 flex items-center justify-center gap-1.5 font-semibold cursor-pointer text-center">
+                                                    <Icon name="upload" size={12} /> Impor Backup <input type="file" accept=".json" onChange={handleImportData} className="hidden" />
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* TAB 2: POS KASIR */}
+                            {activeTab === 'pos' && (
+                                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                                    <div className="lg:col-span-7 space-y-4">
+                                        <div className="flex flex-col sm:flex-row gap-3">
+                                            <div className="relative flex-1">
+                                                <Icon name="search" className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" size={16} />
+                                                <input type="text" placeholder="Cari produk cepat..." value={posSearchQuery} onChange={(e) => setPosSearchQuery(e.target.value)} className="w-full bg-slate-900 border border-slate-800 rounded-xl py-2.5 pl-10 pr-4 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-500" />
+                                            </div>
+                                            <button onClick={() => { setNewProduct({ name: '', price: '', unit: 'PCS' }); setIsNewProductModalOpen(true); }} className="bg-slate-900 border border-slate-800 hover:border-amber-500/40 text-slate-300 px-4 py-2.5 rounded-xl text-sm font-bold flex items-center justify-center gap-1.5">
+                                                <Icon name="plus" size={16} className="text-amber-400" /> Produk Baru
+                                            </button>
+                                        </div>
+
+                                        {filteredPOSProducts.length === 0 ? (
+                                            <div className="bg-slate-900/40 border border-dashed border-slate-800 rounded-2xl py-12 text-center text-slate-500">Produk tidak ditemukan.</div>
+                                        ) : (
+                                            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 overflow-y-auto max-h-[420px] pr-1">
+                                                {filteredPOSProducts.map((p) => (
+                                                    <button key={p.id} onClick={() => handleAddToCart(p)} className="bg-slate-900 hover:bg-slate-850 border border-slate-800 rounded-xl p-3 text-left transition-all hover:scale-[1.02] active:scale-95 flex flex-col justify-between h-24 relative overflow-hidden group">
+                                                        <span className="absolute top-2 right-2 text-[10px] font-bold text-slate-500 bg-slate-950 px-1.5 py-0.5 rounded uppercase">{p.unit}</span>
+                                                        <span className="font-bold text-xs text-slate-300 line-clamp-2 leading-tight pr-8">{p.name}</span>
+                                                        <span className="font-black text-amber-400 text-sm">{formatIDR(p.price)}</span>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <div className="lg:col-span-5 bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-4">
+                                        <div className="flex justify-between items-center pb-3 border-b border-slate-800">
+                                            <h4 className="font-bold text-slate-200 flex items-center gap-2"><Icon name="shopping-cart" size={18} className="text-amber-500" /> Keranjang Belanja</h4>
+                                            <span className="bg-amber-500/20 text-amber-400 text-xs px-2 py-0.5 rounded-full font-bold">{cart.length} Jenis Item</span>
+                                        </div>
+
+                                        {cart.length === 0 ? (
+                                            <div className="py-12 text-center text-slate-500 text-sm">Keranjang kosong. Pilih produk di sebelah kiri.</div>
+                                        ) : (
+                                            <div className="space-y-3 max-h-[220px] overflow-y-auto pr-1">
+                                                {cart.map((item) => (
+                                                    <div key={item.id} className="bg-slate-950 p-2.5 rounded-xl border border-slate-800/40 text-xs space-y-2">
+                                                        <div className="flex justify-between items-start">
+                                                            <div className="min-w-0 pr-2">
+                                                                <span className="font-bold text-slate-200 block truncate">{item.name}</span>
+                                                                <span className="text-slate-500 text-[10px]">{formatIDR(item.price)} / {item.unit}</span>
+                                                            </div>
+                                                            <button onClick={() => handleRemoveFromCart(item.id)} className="text-slate-500 hover:text-rose-400 transition-colors p-1"><Icon name="trash-2" size={13} /></button>
+                                                        </div>
+                                                        <div className="flex items-center justify-between gap-2 pt-1 border-t border-slate-900">
+                                                            <span className="text-[10px] text-slate-500 font-bold uppercase">{item.unit}</span>
+                                                            <div className="flex items-center gap-1 bg-slate-900 p-1 rounded-lg border border-slate-800">
+                                                                <button type="button" onClick={() => handleAdjustQtyStep(item.id, item.unit === 'PCS' || item.unit === 'Box' || item.unit === 'Pack' ? -1 : -0.25)} className="w-6 h-6 flex items-center justify-center bg-slate-950 hover:bg-slate-800 rounded font-bold text-slate-400 text-xs">-</button>
+                                                                <input type="text" value={item.qty} onChange={(e) => handleUpdateQty(item.id, e.target.value)} onBlur={(e) => handleBlurQty(item.id, e.target.value)} className="w-14 text-center bg-transparent text-amber-400 font-bold focus:outline-none text-xs" placeholder="0" />
+                                                                <button type="button" onClick={() => handleAdjustQtyStep(item.id, item.unit === 'PCS' || item.unit === 'Box' || item.unit === 'Pack' ? 1 : 0.25)} className="w-6 h-6 flex items-center justify-center bg-slate-950 hover:bg-slate-800 rounded font-bold text-slate-400 text-xs">+</button>
+                                                            </div>
+                                                            <span className="font-bold text-slate-300 text-right min-w-[70px]">{formatIDR((parseFloat(item.qty) || 0) * item.price)}</span>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+
+                                        <div className="pt-3 border-t border-slate-800 space-y-3 text-xs">
+                                            <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800 space-y-1">
+                                                <label className="text-slate-400 font-semibold flex items-center gap-1"><Icon name="calendar" size={12} className="text-amber-500" /> Tanggal Transaksi</label>
+                                                <input type="datetime-local" value={trxDate} onChange={(e) => setTrxDate(e.target.value)} className="w-full bg-slate-900 border border-slate-800 rounded p-1.5 text-slate-100 text-xs focus:outline-none" />
+                                            </div>
+
+                                            <div className="flex flex-col gap-1">
+                                                <div className="flex justify-between items-center">
+                                                    <label className="text-slate-400 font-semibold">Pelanggan</label>
+                                                    <button onClick={() => setIsNewCustomerModalOpen(true)} className="text-[10px] text-amber-400 font-bold">+ Pelanggan Baru</button>
+                                                </div>
+                                                <select value={selectedCustomerId} onChange={(e) => setSelectedCustomerId(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 focus:outline-none focus:border-amber-500">
+                                                    <option value="">-- Pelanggan Umum --</option>
+                                                    {customers.map(c => <option key={c.id} value={c.id}>{c.name} ({c.phone})</option>)}
+                                                </select>
+                                            </div>
+
+                                            <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 space-y-2.5">
+                                                <span className="text-[10px] text-amber-500 font-bold block uppercase tracking-wider">Metode Pembayaran</span>
+                                                <div className="grid grid-cols-2 gap-2">
+                                                    <div>
+                                                        <label className="text-slate-400 block mb-1 font-semibold">Kas Masuk Lewat</label>
+                                                        <select value={cashMethod} onChange={(e) => setCashMethod(e.target.value)} className="w-full bg-slate-900 border border-slate-800 rounded p-1.5 text-slate-200 text-xs focus:outline-none">
+                                                            <option value="Tunai">Tunai / Cash</option>
+                                                            <option value="Transfer">Transfer Manual</option>
+                                                        </select>
+                                                    </div>
+                                                    <div>
+                                                        <label className="text-slate-400 block mb-1 font-semibold">Cash Dibayar (Rp)</label>
+                                                        <input type="number" placeholder="0" min="0" value={cashPaidInput} onChange={(e) => setCashPaidInput(e.target.value)} className="w-full bg-slate-900 border border-slate-800 rounded p-1.5 text-slate-100 font-black text-sm text-right focus:outline-none focus:ring-1 focus:ring-amber-500" />
+                                                    </div>
+                                                </div>
+
+                                                <div className="flex flex-wrap gap-1 pt-1 justify-end">
+                                                    <button type="button" onClick={() => setCashPaidInput(cartTotal.toString())} className="bg-slate-900 hover:bg-slate-850 text-[10px] text-amber-400 font-bold px-2 py-1 rounded">Uang Pas</button>
+                                                    <button type="button" onClick={() => setCashPaidInput('50000')} className="bg-slate-900 hover:bg-slate-850 text-[10px] text-slate-300 font-semibold px-2 py-1 rounded">50k</button>
+                                                    <button type="button" onClick={() => setCashPaidInput('100000')} className="bg-slate-900 hover:bg-slate-850 text-[10px] text-slate-300 font-semibold px-2 py-1 rounded">100k</button>
+                                                    <button type="button" onClick={() => setCashPaidInput('0')} className="bg-slate-900 hover:bg-slate-850 text-[10px] text-rose-400 font-bold px-2 py-1 rounded">Bon Penuh</button>
+                                                </div>
+
+                                                {derivedBonAmount > 0 && (
+                                                    <div className="border-t border-slate-900 pt-2.5 mt-1 space-y-2">
+                                                        <span className="text-[10px] text-amber-400 font-bold block uppercase tracking-wider">Durasi &amp; Jatuh Tempo Bon</span>
+                                                        <div className="grid grid-cols-2 gap-2">
+                                                            <div>
+                                                                <label className="text-[10px] text-slate-500 block mb-0.5">Jangka Waktu</label>
+                                                                <select value={dueDaysSelection} onChange={(e) => setDueDaysSelection(e.target.value)} className="w-full bg-slate-900 border border-slate-800 rounded p-1 text-slate-200 text-xs focus:outline-none">
+                                                                    <option value="3">3 Hari</option>
+                                                                    <option value="7">7 Hari (Default)</option>
+                                                                    <option value="14">14 Hari</option>
+                                                                    <option value="30">30 Hari</option>
+                                                                    <option value="custom">Kustom Hari</option>
+                                                                </select>
+                                                            </div>
+                                                            <div>
+                                                                {dueDaysSelection === 'custom' ? (
+                                                                    <div>
+                                                                        <label className="text-[10px] text-slate-500 block mb-0.5">Jumlah Hari</label>
+                                                                        <input type="number" value={customDueDays} onChange={(e) => setCustomDueDays(e.target.value)} className="w-full bg-slate-900 border border-slate-800 rounded p-1 text-slate-100 text-xs text-center font-bold" min="1" />
+                                                                    </div>
+                                                                ) : (
+                                                                    <div>
+                                                                        <label className="text-[10px] text-slate-500 block mb-0.5">Tgl Jatuh Tempo</label>
+                                                                        <input type="date" value={posDueDate} onChange={(e) => setPosDueDate(e.target.value)} className="w-full bg-slate-900 border border-slate-800 rounded p-1 text-slate-100 text-xs text-center font-semibold" />
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                                
+                                                <div className="bg-slate-900/60 p-2.5 rounded border border-slate-850 space-y-1.5 text-[11px]">
+                                                    <div className="flex justify-between items-center"><span className="text-slate-400">Total Tagihan:</span><span className="font-bold text-slate-100">{formatIDR(cartTotal)}</span></div>
+                                                    <div className="flex justify-between items-center">
+                                                        <span className="text-slate-400">Status Otomatis:</span>
+                                                        <span className={`font-black uppercase px-2 py-0.5 rounded ${derivedStatus === 'Lunas' ? 'bg-emerald-500/10 text-emerald-400' : derivedStatus === 'Sebagian' ? 'bg-amber-500/10 text-amber-400' : 'bg-rose-500/10 text-rose-400'}`}>
+                                                            {derivedStatus}
+                                                        </span>
+                                                    </div>
+                                                    {derivedBonAmount > 0 && <div className="flex justify-between items-center text-rose-400 font-semibold"><span>Sisa Jadi BON (Utang):</span><span>{formatIDR(derivedBonAmount)}</span></div>}
+                                                    {derivedChangeAmount > 0 && <div className="flex justify-between items-center text-emerald-400 font-semibold"><span>Kembalian Kasir:</span><span>{formatIDR(derivedChangeAmount)}</span></div>}
+                                                </div>
+                                            </div>
+
+                                            <div className="space-y-1.5 pt-2 border-t border-slate-800">
+                                                <div className="flex justify-between text-base font-black text-slate-100"><span>Total Akhir:</span><span className="text-amber-400">{formatIDR(cartTotal)}</span></div>
+                                            </div>
+                                        </div>
+
+                                        <button onClick={handleCheckout} disabled={cart.length === 0} className="w-full bg-amber-500 hover:bg-amber-400 text-slate-950 font-black py-3 rounded-xl transition-all shadow-lg shadow-amber-500/10 hover:shadow-amber-500/20 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
+                                            <Icon name="check" size={18} /> Simpan Transaksi &amp; Struk
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* TAB 3: KAS BON / PIUTANG */}
+                            {activeTab === 'kasbon' && (
+                                <div className="space-y-6">
+                                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                                        <div>
+                                            <h3 className="text-lg font-bold text-slate-200">Buku Kas Bon Digital</h3>
+                                        </div>
+                                        <div className="flex bg-slate-900 p-1 rounded-xl border border-slate-800">
+                                            <button onClick={() => setSubTabBukuKas('daftar')} className={`text-xs font-bold px-4 py-2 rounded-lg transition-all ${subTabBukuKas === 'daftar' ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-slate-100'}`}>Daftar Piutang</button>
+                                            <button onClick={() => setSubTabBukuKas('kalender')} className={`text-xs font-bold px-4 py-2 rounded-lg transition-all ${subTabBukuKas === 'kalender' ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-slate-100'}`}>Kalender Jatuh Tempo</button>
+                                        </div>
+                                    </div>
+
+                                    {subTabBukuKas === 'daftar' ? (
+                                        <div className="space-y-4">
+                                            <div className="flex flex-wrap gap-2 bg-slate-900/60 p-2.5 rounded-xl border border-slate-800/80 text-xs">
+                                                <button onClick={() => setDebtFilterStatus('all')} className={`px-3 py-1.5 rounded-lg font-medium ${debtFilterStatus === 'all' ? 'bg-amber-500 text-slate-950' : 'bg-slate-950 text-slate-400 hover:text-slate-200'}`}>Semua ({activeDebts.length})</button>
+                                                <button onClick={() => setDebtFilterStatus('overdue')} className={`px-3 py-1.5 rounded-lg font-medium ${debtFilterStatus === 'overdue' ? 'bg-rose-500 text-slate-100' : 'bg-rose-500/10 text-rose-400'}`}>Overdue</button>
+                                                <button onClick={() => setDebtFilterStatus('mendekati')} className={`px-3 py-1.5 rounded-lg font-medium ${debtFilterStatus === 'mendekati' ? 'bg-amber-500/20 text-amber-300' : 'bg-slate-950 text-slate-400'}`}>Mendekati</button>
+                                            </div>
+
+                                            {filteredActiveDebts.length === 0 ? (
+                                                <div className="bg-slate-900/40 border border-dashed border-slate-800 rounded-2xl py-16 text-center text-slate-500">Tidak ada catatan kas bon aktif.</div>
+                                            ) : (
+                                                <div className="space-y-4">
+                                                    {filteredActiveDebts.map((customerObj) => (
+                                                        <div key={customerObj.id} className="bg-slate-900 border border-slate-800/80 rounded-2xl p-4 space-y-4">
+                                                            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                                                                <div className="cursor-pointer flex-1" onClick={() => setExpandedCustomerId(expandedCustomerId === customerObj.id ? null : customerObj.id)}>
+                                                                    <div className="flex items-center gap-2.5">
+                                                                        <span className="font-extrabold text-slate-200 text-base flex items-center gap-2">
+                                                                            {customerObj.name}
+                                                                            <Icon name={expandedCustomerId === customerObj.id ? 'chevron-up' : 'chevron-down'} size={16} className="text-amber-500" />
+                                                                        </span>
+                                                                        <span className={`text-[9px] font-black px-2 py-0.5 rounded-full ${customerObj.overallStatus === 'Overdue' ? 'bg-rose-500/20 text-rose-400' : customerObj.overallStatus === 'Mendekati' ? 'bg-amber-500/20 text-amber-300' : 'bg-emerald-500/20 text-emerald-400'}`}>
+                                                                            {customerObj.overallStatus.toUpperCase()}
+                                                                        </span>
+                                                                    </div>
+                                                                    <span className="text-xs text-slate-400 block mt-0.5">{customerObj.phone || 'No HP tidak diset'} &bull; {customerObj.transactionsList.length} Nota Kas Bon Aktif</span>
+                                                                </div>
+                                                                <div className="flex items-center gap-3">
+                                                                    <div className="text-right">
+                                                                        <span className="text-[10px] text-slate-400 block uppercase font-bold tracking-wider">Sisa Piutang</span>
+                                                                        <span className="text-base font-black text-rose-400">{formatIDR(customerObj.remainingDebt)}</span>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+
+                                                            {expandedCustomerId === customerObj.id && (
+                                                                <div className="border-t border-slate-800/60 pt-3 space-y-3">
+                                                                    <span className="text-xs font-bold text-slate-400 block">Daftar Nota Belum Lunas:</span>
+                                                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                                        {customerObj.transactionsList.map((tx) => (
+                                                                            <div key={tx.id} className="bg-slate-950 border border-slate-800/40 p-3 rounded-xl flex flex-col justify-between gap-3">
+                                                                                <div>
+                                                                                    <div className="flex justify-between items-center mb-1">
+                                                                                        <span className="text-xs font-bold text-slate-200">{tx.id}</span>
+                                                                                        <span className="text-[10px] font-semibold text-slate-400">{formatDate(tx.date).slice(0, 11)}</span>
+                                                                                    </div>
+                                                                                    <div className="space-y-1 text-xs">
+                                                                                        <div className="flex justify-between"><span className="text-slate-500">Total Nota:</span><span className="font-semibold text-slate-300">{formatIDR(tx.total)}</span></div>
+                                                                                        <div className="flex justify-between font-bold border-t border-slate-900 pt-1"><span className="text-slate-400">Sisa Tagihan:</span><span className="text-rose-400">{formatIDR(tx.calculatedRemaining)}</span></div>
+                                                                                    </div>
+                                                                                </div>
+                                                                                <div className="flex gap-2">
+                                                                                    <button onClick={() => { setDebtPaymentTarget(tx); setDebtPaymentAmount(tx.calculatedRemaining.toString()); setIsPayDebtModalOpen(true); }} className="flex-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-black py-1.5 rounded-lg text-xs transition-all">Bayar Nota</button>
+                                                                                    <button onClick={() => setActiveReceipt(tx)} className="px-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs" title="Buka Struk"><Icon name="printer" size={13} /></button>
+                                                                                </div>
+                                                                            </div>
+                                                                        ))}
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-4">
+                                            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+                                                <div className="flex justify-between items-center">
+                                                    <h4 className="font-bold text-slate-200 text-base">{monthNames[calendarMonth]} {calendarYear}</h4>
+                                                    <div className="flex gap-1.5">
+                                                        <button onClick={() => changeCalendarMonth('prev')} className="bg-slate-950 border border-slate-800 text-slate-300 px-3 py-1.5 rounded-lg text-xs">&larr; Prev</button>
+                                                        <button onClick={() => changeCalendarMonth('next')} className="bg-slate-950 border border-slate-800 text-slate-300 px-3 py-1.5 rounded-lg text-xs">Next &rarr;</button>
+                                                    </div>
+                                                </div>
+                                                <div className="grid grid-cols-7 gap-1.5 mt-4 text-center">
+                                                    {Array.from({ length: firstDayOfMonth }).map((_, index) => <div key={`empty-${index}`} className="aspect-square bg-slate-950/20 rounded-lg"></div>)}
+                                                    {Array.from({ length: daysInMonth }).map((_, index) => {
+                                                        const day = index + 1; const dateString = `${calendarYear}-${String(calendarMonth + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                                                        const debtsOnThisDay = calendarDebtsMap[dateString] || []; const hasDebts = debtsOnThisDay.length > 0;
+                                                        const isSelected = selectedCalendarDay === day;
+                                                        return (
+                                                            <button key={`day-${day}`} onClick={() => setSelectedCalendarDay(isSelected ? null : day)} className={`aspect-square rounded-xl flex flex-col justify-between p-1.5 text-left border ${isSelected ? 'bg-amber-500 text-slate-950' : 'bg-slate-950 border-slate-850'}`}>
+                                                                <span className="font-bold text-xs">{day}</span>
+                                                                {hasDebts && <span className="w-2 h-2 rounded-full bg-rose-500"></span>}
+                                                            </button>
+                                                        );
+                                                    })}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {/* TAB 6: ADVANCED WHATSAPP REMINDER TAB */}
+                            {activeTab === 'reminder' && (
+                                <div className="space-y-6">
+                                    <div>
+                                        <h3 className="text-lg font-bold text-slate-200">WhatsApp Reminder &amp; Struk Rekap</h3>
+                                        <p className="text-xs text-slate-400">Kelola master template pesan WhatsApp dan kirim rekap nota secara kolektif.</p>
+                                    </div>
+
+                                    <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-4">
+                                        <div className="flex justify-between items-center pb-2 border-b border-slate-800 flex-wrap gap-2">
+                                            <span className="text-xs font-black text-amber-400 uppercase tracking-wider">Antrean Pelanggan</span>
+                                            {activeDebts.filter(d => d.overallStatus === 'Overdue').length > 0 && (
+                                                <button onClick={handleBulkReminder} className="bg-rose-600 hover:bg-rose-500 text-slate-100 text-xs font-black px-3 py-1.5 rounded-xl flex items-center gap-1.5">
+                                                    <Icon name="message-square" size={13} /> Bulk Reminder
+                                                </button>
+                                            )}
+                                        </div>
+
+                                        {activeDebts.length === 0 ? (
+                                            <div className="py-12 text-center text-slate-500 text-xs italic">Semua transaksi lunas. Tidak ada data kredit yang tertunggak.</div>
+                                        ) : (
+                                            <div className="space-y-3">
+                                                {activeDebts.map((c) => {
+                                                    const newestDueDate = c.transactionsList[0]?.dueDate || '';
+                                                    return (
+                                                        <div key={c.id} className="bg-slate-950 p-3.5 rounded-xl border border-slate-850/80 flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
+                                                            <div>
+                                                                <div className="flex items-center gap-2">
+                                                                    <span className="font-extrabold text-sm text-slate-200">{c.name}</span>
+                                                                    <span className={`text-[9px] font-black px-2 py-0.5 rounded-full ${c.overallStatus === 'Overdue' ? 'bg-rose-500/20 text-rose-400' : 'bg-emerald-500/20 text-emerald-400'}`}>
+                                                                        {c.overallStatus.toUpperCase()}
+                                                                    </span>
+                                                                </div>
+                                                                <span className="text-xs text-slate-500 block mt-0.5">{c.phone || 'HP tidak diset'} &bull; {c.transactionsList.length} Nota</span>
+                                                                <div className="flex flex-wrap gap-4 mt-2 text-xs text-slate-400">
+                                                                    <span>Sisa Piutang: <strong className="text-rose-400">{formatIDR(c.remainingDebt)}</strong></span>
+                                                                </div>
+                                                            </div>
+                                                            <div className="flex gap-2 w-full md:w-auto">
+                                                                <button onClick={() => {
+                                                                    const detailItemsText = c.transactionsList.map(tx => tx.items.map(it => `${it.qty} ${it.unit} ${it.name}`).join(', ')).join('; ');
+                                                                    sendWhatsAppReminder(c.name, c.phone, c.remainingDebt, newestDueDate, detailItemsText);
+                                                                }} className="flex-1 md:flex-none bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold px-3 py-2 rounded-lg flex items-center justify-center gap-1.5 transition-all">
+                                                                    <Icon name="message-square" size={12} /> Kirim Pesan
+                                                                </button>
+                                                                
+                                                                {/* TOMBOL UPDATE REKAP (FITUR BARU) */}
+                                                                <button onClick={() => handleShareSummaryImage(c)} className="bg-slate-900 hover:bg-slate-800 text-amber-400 text-xs px-3 py-2 rounded-lg border border-slate-850 flex items-center justify-center gap-1 font-bold" title="Export Rekap Semua Tagihan">
+                                                                    <Icon name="share-2" size={12} /> Rekap PNG
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* TAB 7: PENGATURAN TOKO & PRINTER */}
+                            {activeTab === 'pengaturan' && (
+                                <div className="space-y-6">
+                                    <div className="bg-slate-900 border border-slate-800/80 rounded-2xl p-5">
+                                        <h3 className="text-base font-bold text-slate-200 mb-4 pb-2 border-b border-slate-800">Identitas Warung / Toko Custom</h3>
+                                        <form onSubmit={(e) => { e.preventDefault(); showToast('Identitas Toko Berhasil Disimpan!'); }} className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                                            <div><label className="text-slate-400 font-semibold block mb-1">Nama Warung</label><input type="text" value={shopConfig.name} onChange={(e) => setShopConfig({ ...shopConfig, name: e.target.value.toUpperCase() })} className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-slate-200" /></div>
+                                            <div><label className="text-slate-400 font-semibold block mb-1">Nama Pemilik</label><input type="text" value={shopConfig.owner} onChange={(e) => setShopConfig({ ...shopConfig, owner: e.target.value })} className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-slate-200" /></div>
+                                            <div className="md:col-span-2"><label className="text-slate-400 font-semibold block mb-1">Alamat Lengkap</label><input type="text" value={shopConfig.address} onChange={(e) => setShopConfig({ ...shopConfig, address: e.target.value })} className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-slate-200" /></div>
+                                            <div><label className="text-slate-400 font-semibold block mb-1">Nomor WhatsApp Resmi</label><input type="text" value={shopConfig.whatsapp} onChange={(e) => setShopConfig({ ...shopConfig, whatsapp: e.target.value })} className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-slate-200" /></div>
+                                            <div className="flex items-end"><button type="submit" className="w-full bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold py-2.5 px-4 rounded-lg">Simpan Branding Toko</button></div>
+                                        </form>
+                                    </div>
+
+                                    {!isLicensed && (
+                                        <div className="bg-gradient-to-tr from-amber-500/20 to-rose-500/10 border border-amber-500/50 rounded-2xl p-5 shadow-lg">
+                                            <h3 className="text-base font-bold text-amber-400 mb-2 flex items-center gap-2"><Icon name="key" size={16}/> Aktivasi Lisensi (BIONE SELL)</h3>
+                                            <form onSubmit={handleActivateLicense} className="flex flex-col sm:flex-row gap-3 text-xs mt-3">
+                                                <div className="relative flex-1">
+                                                    <Icon name="key" className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" size={14} />
+                                                    <input type="text" value={licenseInput} onChange={(e) => setLicenseInput(e.target.value)} placeholder="Contoh: BIONE-XXXX-YYYY" className="w-full bg-slate-950 border border-amber-500/50 rounded-lg py-2.5 pl-9 pr-4 text-slate-100 uppercase" required />
+                                                </div>
+                                                <button type="submit" className="bg-amber-500 text-slate-950 font-bold py-2.5 px-6 rounded-lg">Verifikasi &amp; Aktifkan</button>
+                                            </form>
+                                        </div>
+                                    )}
+
+                                    <div className="bg-slate-900 border border-slate-800/80 rounded-2xl p-5 space-y-4">
+                                        <h3 className="text-base font-bold text-slate-200">Printer Thermal Bluetooth</h3>
+                                        <div className="flex gap-3 items-center">
+                                            <button onClick={pairedPrinter ? handleDisconnectPrinter : handlePairPrinter} className="text-xs font-bold py-2.5 px-4 rounded-lg bg-amber-500 text-slate-950">
+                                                {pairedPrinter ? 'Putuskan Printer' : 'Sandingkan Printer'}
+                                            </button>
+                                            {pairedPrinter && <button onClick={handleTestPrint} className="text-xs bg-slate-950 text-slate-300 font-semibold py-2.5 px-4 rounded-lg border border-slate-800">Test Print</button>}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                        </main>
+                    </div>
+
+                    {/* MODAL STRUK */}
+                    {activeReceipt && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm print:bg-white print:p-0">
+                            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 max-w-sm w-full space-y-4 shadow-2xl print:bg-white print:border-none print:shadow-none print:p-0 print:max-w-full">
+                                <div className="flex justify-between items-center print:hidden">
+                                    <h4 className="font-bold text-sm text-slate-300">Detil Struk Belanja</h4>
+                                    <button onClick={() => setActiveReceipt(null)} className="text-slate-400 hover:text-slate-100"><Icon name="x" size={18} /></button>
+                                </div>
+                                <div id="thermal-receipt" className="bg-white text-slate-950 p-4 font-mono text-[11px] leading-relaxed rounded-xl shadow-inner border border-slate-200 max-h-[380px] overflow-y-auto print:border-none print:shadow-none">
+                                    <div className="text-center space-y-1">
+                                        <span className="font-bold text-sm uppercase block tracking-wider">{shopConfig.name}</span>
+                                        <span className="block text-[10px] text-slate-600">{shopConfig.address}</span>
+                                        <span className="block border-b border-dashed border-slate-400 my-2"></span>
+                                    </div>
+                                    <div className="space-y-1 text-[10px]">
+                                        <div className="flex justify-between"><span>No: {activeReceipt.id}</span><span>{formatDate(activeReceipt.date)}</span></div>
+                                        <div className="flex justify-between"><span>Pelanggan:</span><span className="font-semibold">{activeReceipt.customerName}</span></div>
+                                        <span className="block border-b border-dashed border-slate-400 my-2"></span>
+                                    </div>
+                                    <div className="space-y-1">
+                                        {activeReceipt.items.map((item, idx) => (
+                                            <div key={idx} className="space-y-0.5">
+                                                <span className="font-bold block text-slate-900 truncate">{item.name}</span>
+                                                <div className="flex justify-between text-[10px] text-slate-600 pl-2">
+                                                    <span>{item.qty} {item.unit} x {item.price.toLocaleString('id-ID')}</span><span>{formatIDR(item.price * item.qty).replace('Rp', '').trim()}</span>
+                                                </div>
+                                            </div>
+                                        ))}
+                                        <span className="block border-b border-dashed border-slate-400 my-2"></span>
+                                    </div>
+                                    <div className="space-y-1 text-right">
+                                        <div className="flex justify-between text-slate-600"><span>Subtotal:</span><span>{formatIDR(activeReceipt.subtotal)}</span></div>
+                                        <div className="flex justify-between font-bold text-xs pt-1 border-t border-dashed border-slate-300"><span>TOTAL AKHIR:</span><span>{formatIDR(activeReceipt.total)}</span></div>
+                                        <div className="flex justify-between text-slate-600"><span>Cash Dibayar:</span><span>{formatIDR(activeReceipt.cashPaid)}</span></div>
+                                        {activeReceipt.bonAmount > 0 && <div className="flex justify-between font-bold text-rose-600 text-xs"><span>Sisa Bon:</span><span>{formatIDR(activeReceipt.bonAmount)}</span></div>}
+                                    </div>
+                                </div>
+                                <div className="flex flex-col gap-2 pt-2 print:hidden text-xs">
+                                    <div className="flex gap-2">
+                                        <button onClick={() => handlePrintEscPos(activeReceipt)} className="flex-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-black py-2.5 rounded-xl"><Icon name="printer" size={14} className="inline"/> Print Thermal</button>
+                                        <button onClick={() => handleShareReceiptImage(activeReceipt)} className="px-4 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black py-2.5 rounded-xl"><Icon name="share-2" size={14} className="inline"/> Share PNG</button>
+                                    </div>
+                                    <button onClick={triggerPrintReceipt} className="w-full bg-slate-800 text-slate-300 py-2 rounded-lg">Simpan PDF</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* MODAL BAYAR UTANG */}
+                    {isPayDebtModalOpen && debtPaymentTarget && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+                            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 max-w-sm w-full space-y-4">
+                                <div className="flex justify-between items-center pb-2 border-b border-slate-800"><h4 className="font-bold text-sm text-slate-200">Cicil Pembayaran Nota</h4><button onClick={() => setIsPayDebtModalOpen(false)} className="text-slate-400"><Icon name="x" size={16} /></button></div>
+                                <div className="space-y-3 text-xs">
+                                    <div><label className="text-slate-400 block mb-1">Tanggal Pembayaran</label><input type="datetime-local" value={debtPaymentDate} onChange={(e) => setDebtPaymentDate(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-slate-100 focus:outline-none" required /></div>
+                                    <div><label className="text-slate-400 block mb-1">Nominal Cicilan (Rp)</label><input type="number" value={debtPaymentAmount} onChange={(e) => setDebtPaymentAmount(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-slate-100 focus:outline-none" /></div>
+                                    <button onClick={handlePayDebtSpecific} className="w-full bg-emerald-500 text-slate-950 font-bold py-2.5 rounded-lg">Simpan</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // --- RENDER REACT KE DOM ---
+        const rootElement = document.getElementById('root');
+        const root = ReactDOM.createRoot(rootElement);
+        root.render(<App />);
+
+    </script>
+</body>
+</html>
